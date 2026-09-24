@@ -13,6 +13,7 @@ from . import pki
 from . import provision
 from . import renew as renew_mod
 from . import server as srv
+from . import update as update_mod
 from .system import (
     give_to_user,
     run,
@@ -34,6 +35,7 @@ from .util import (
     clear_screen,
     dim,
     err,
+    human_bytes,
     info,
     ok,
     pause,
@@ -42,14 +44,6 @@ from .util import (
     warn,
     write_file,
 )
-
-
-def human_bytes(num: float) -> str:
-    for unit in ("Б", "КиБ", "МиБ", "ГиБ", "ТиБ"):
-        if abs(num) < 1024:
-            return "%.0f %s" % (num, unit) if unit == "Б" else "%.1f %s" % (num, unit)
-        num /= 1024.0
-    return "%.1f ПиБ" % num
 
 
 # --------------------------------------------------------------------------- #
@@ -94,10 +88,10 @@ def cmd_client_list(args) -> int:
     printable = [
         [r["name"], r["status"], r["expires"],
          "—" if r["days_left"] is None else str(r["days_left"]),
-         r["address"] or "—", r["created"]]
+         r["address"] or "—", human_bytes(r["traffic_total"]), r["created"]]
         for r in rows
     ]
-    print(table(printable, ["ИМЯ", "СТАТУС", "ДО", "ДНЕЙ", "АДРЕС", "СОЗДАН"]))
+    print(table(printable, ["ИМЯ", "СТАТУС", "ДО", "ДНЕЙ", "АДРЕС", "ТРАФИК", "СОЗДАН"]))
     return 0
 
 
@@ -196,9 +190,9 @@ def cmd_status(args) -> int:
         shown = all_clients[:20]
         rows = [[c["name"], c["status"], c["expires"],
                  "—" if c["days_left"] is None else str(c["days_left"]),
-                 c["address"] or "—"] for c in shown]
+                 c["address"] or "—", human_bytes(c["traffic_total"])] for c in shown]
         print()
-        print(table(rows, ["ИМЯ", "СТАТУС", "ДО", "ДНЕЙ", "АДРЕС"]))
+        print(table(rows, ["ИМЯ", "СТАТУС", "ДО", "ДНЕЙ", "АДРЕС", "ТРАФИК"]))
         if len(all_clients) > len(shown):
             print(dim("  …ещё %d — смотрите 'ovpnctl client list'" % (len(all_clients) - len(shown))))
     if online:
@@ -405,6 +399,36 @@ def cmd_uninstall(args) -> int:
     return 0
 
 
+def cmd_update(args) -> int:
+    """Обновление кода ovpnctl из GitHub; пакеты, PKI и клиенты не трогаются."""
+    if args.finish:
+        # сюда приходит уже новый код — перегенерировать конфиги по своим шаблонам
+        for item in update_mod.finish():
+            print("* %s" % item)
+        return 0
+
+    result = update_mod.run(repo=args.repo, branch=args.branch, local=args.source,
+                            check_only=args.check, force=args.force)
+    current, latest = result["current"], result["latest"]
+    print("  Установлена: %s (сборка %s)" % (current["version"], current["build"]))
+    print("  Доступна:    %s (сборка %s)" % (latest["version"], latest["build"]))
+    if not result["updated"]:
+        if latest["build"] == current["build"]:
+            ok("Обновлять нечего — установлена актуальная версия.")
+        else:
+            info("Есть обновление — установить: ovpnctl update")
+        return 0
+
+    ok("ovpnctl обновлён: %s → %s (сборка %s → %s)."
+       % (current["version"], latest["version"], current["build"], latest["build"]))
+    if result["changed"]:
+        info("Обновлены файлы сервера: %s — OpenVPN перезапущен, клиенты переподключатся."
+             % ", ".join(result["changed"]))
+    elif cfgmod.config_exists():
+        info("Конфигурация сервера не изменилась, подключения не прерывались.")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     """Самодиагностика: зависимости, служба, сеть, PKI."""
     from .system import verify_dependencies
@@ -507,6 +531,7 @@ MENU_SECTIONS = [
         (14, "Диагностика (doctor)"),
         (15, "Резервная копия"),
         (16, "Открыть порт VPN в ufw"),
+        (17, "Обновить ovpnctl"),
     ],
 ]
 
@@ -698,6 +723,22 @@ def _menu_ufw(cfg: dict) -> None:
     cmd_ufw(_Args(install=install_ufw, remove=False, ssh=with_ssh))
 
 
+def _menu_update(cfg: dict) -> None:
+    result = update_mod.run()
+    current, latest = result["current"], result["latest"]
+    if not result["updated"]:
+        ok("Обновлять нечего — установлена актуальная версия %s (сборка %s)."
+           % (current["version"], current["build"]))
+        return
+    ok("ovpnctl обновлён: %s → %s (сборка %s → %s)."
+       % (current["version"], latest["version"], current["build"], latest["build"]))
+    if result["changed"]:
+        info("Обновлены файлы сервера: %s — OpenVPN перезапущен." % ", ".join(result["changed"]))
+    # в памяти этого процесса старый код — перезапускаем меню уже новым
+    pause("Нажмите Enter, чтобы открыть меню новой версии")
+    os.execv(sys.executable, [sys.executable, "-m", "ovpnctl"])
+
+
 MENU_ACTIONS = {
     "1": _menu_client_add,
     "2": _menu_client_list,
@@ -717,6 +758,7 @@ MENU_ACTIONS = {
     "14": lambda cfg: cmd_doctor(_Args()),
     "15": lambda cfg: cmd_backup(_Args(output=None)),
     "16": _menu_ufw,
+    "17": _menu_update,
 }
 
 
@@ -831,6 +873,19 @@ def build_parser() -> argparse.ArgumentParser:
     backup_parser = sub.add_parser("backup", help="архив PKI, профилей и конфигурации")
     backup_parser.add_argument("-o", "--output", help="каталог для архива")
     backup_parser.set_defaults(func=cmd_backup)
+
+    update_parser = sub.add_parser(
+        "update", help="обновить ovpnctl из GitHub (без переустановки сервера)")
+    update_parser.add_argument("--check", action="store_true",
+                               help="только проверить, есть ли новая версия")
+    update_parser.add_argument("--force", action="store_true",
+                               help="переустановить код, даже если версия та же")
+    update_parser.add_argument("--repo", help="репозиторий (по умолчанию — откуда ставили)")
+    update_parser.add_argument("--branch", help="ветка (по умолчанию master, затем main)")
+    update_parser.add_argument("--from", dest="source", metavar="PATH",
+                               help="обновить из локального каталога или .tar.gz")
+    update_parser.add_argument("--finish", action="store_true", help=argparse.SUPPRESS)
+    update_parser.set_defaults(func=cmd_update)
 
     doctor_parser = sub.add_parser("doctor", help="самодиагностика установки")
     doctor_parser.set_defaults(func=cmd_doctor)

@@ -118,6 +118,9 @@ ovpnctl client delete fromsudo -y >/dev/null 2>&1
 
 chk "в списке клиентов виден адрес подключённого" \
     "ovpnctl client list | grep phone | grep -qE '10\\.8\\.0\\.[0-9]+'"
+chk "в списке клиентов есть колонка ТРАФИК" "ovpnctl client list | grep -q 'ТРАФИК'"
+chk "у подключённого клиента трафик текущей сессии" \
+    "ovpnctl client list | grep phone | grep -qE '[0-9.]+ (КиБ|МиБ)'"
 echo "  --- ovpnctl client list ---"; ovpnctl client list
 echo "  --- ovpnctl online ---"; ovpnctl online
 echo "  --- ovpnctl status (фрагмент) ---"; ovpnctl status 2>&1 | head -14
@@ -170,6 +173,11 @@ fi
 echo; echo "=== 6. отзыв доступа ==="
 ovpnctl client revoke phone -y >/dev/null 2>&1 && ok "client revoke отработал" || bad "client revoke"
 chk "серийник в CRL" "openssl crl -in /etc/openvpn/server/crl.pem -noout -text | grep -q 'Serial Number'"
+sleep 1
+chk "openvpn (от nobody) записал трафик завершённой сессии" \
+    "ovpnctl client list >/dev/null && grep -q '\"phone\"' /etc/ovpnctl/traffic.json"
+chk "у отозванного клиента в списке ненулевой трафик" \
+    "ovpnctl client list --json | python3 -c 'import json,sys; r=[c for c in json.load(sys.stdin) if c[\"name\"]==\"phone\"]; sys.exit(0 if r and r[0][\"traffic_total\"] > 0 else 1)'"
 pkill -f 'openvpn --config /etc/ovpnctl/profiles/phone.ovpn'; sleep 2
 SRV_LOG_MARK=$(wc -l < /var/log/ovpn-server.log)
 : > /var/log/ovpn-client2.log

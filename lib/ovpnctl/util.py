@@ -178,6 +178,14 @@ def ask_optional(prompt: str, current=None):
     return raw or None
 
 
+def human_bytes(num: float) -> str:
+    for unit in ("Б", "КиБ", "МиБ", "ГиБ", "ТиБ"):
+        if abs(num) < 1024:
+            return "%.0f %s" % (num, unit) if unit == "Б" else "%.1f %s" % (num, unit)
+        num /= 1024.0
+    return "%.1f ПиБ" % num
+
+
 def table(rows, headers) -> str:
     """Простая текстовая таблица без внешних зависимостей."""
     all_rows = [list(headers)] + [[str(c) for c in r] for r in rows]

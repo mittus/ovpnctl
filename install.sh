@@ -6,7 +6,7 @@
 # Поддержка: Debian 10/11/12/13, Ubuntu 20.04/22.04/24.04+ (amd64/arm64).
 #
 #   Установка одной командой:
-#       sudo bash <(wget -qO- https://raw.githubusercontent.com/mittus/openvpn/master/install.sh)
+#       sudo bash <(wget -qO- https://raw.githubusercontent.com/mittus/ovpnctl/master/install.sh)
 #
 # Параметры сервера выбираются автоматически (внешний IP, свободная подсеть, udp/1194,
 # EC-ключи, DNS Cloudflare) и меняются потом командой 'ovpnctl set'.
@@ -14,7 +14,7 @@
 #
 set -euo pipefail
 
-REPO_URL="${OVPN_REPO_URL:-https://github.com/mittus/openvpn}"
+REPO_URL="${OVPN_REPO_URL:-https://github.com/mittus/ovpnctl}"
 REPO_BRANCH="${OVPN_REPO_BRANCH:-}"     # пусто = пробуем master, затем main
 REPO_SUBDIR="${OVPN_REPO_SUBDIR:-}"     # пусто = исходники лежат в корне репозитория
 
@@ -24,6 +24,7 @@ ETC_DIR="/etc/ovpnctl"
 LOG_TAG="[ovpnctl-install]"
 TMP_DIR=""                              # временный каталог для скачанных исходников
 CODE_FP_BEFORE=""                       # отпечаток установленного кода до обновления
+SOURCE_BRANCH=""                        # ветка, из которой скачаны исходники (пусто — локальные)
 
 C_OK=$'\033[1;32m'; C_ERR=$'\033[1;31m'; C_WARN=$'\033[1;33m'; C_INFO=$'\033[1;36m'; C_OFF=$'\033[0m'
 if [ ! -t 1 ]; then C_OK=; C_ERR=; C_WARN=; C_INFO=; C_OFF=; fi
@@ -165,7 +166,7 @@ code_fingerprint() {
     local dir="$1"
     [ -d "$dir" ] || { echo "нет"; return; }
     find "$dir" -type f -name '*.py' -print0 2>/dev/null \
-        | sort -z | xargs -0 cat 2>/dev/null | md5sum | cut -c1-8
+        | LC_ALL=C sort -z | xargs -0 cat 2>/dev/null | md5sum | cut -c1-8
 }
 
 pkg_installed() { dpkg-query -W -f='${db:Status-Status}\n' "$1" 2>/dev/null | grep -q '^installed$'; }
@@ -237,7 +238,7 @@ fetch_sources() {
         return
     fi
 
-    [ -n "$REPO_URL" ] || die "не задан OVPN_REPO_URL (например https://github.com/mittus/openvpn)."
+    [ -n "$REPO_URL" ] || die "не задан OVPN_REPO_URL (например https://github.com/mittus/ovpnctl)."
 
     local branches branch tarball got=0 tmp
     TMP_DIR="$(mktemp -d)"; tmp="$TMP_DIR"
@@ -247,9 +248,9 @@ fetch_sources() {
         tarball="$REPO_URL/archive/refs/heads/$branch.tar.gz"
         info "Скачиваю исходники: $tarball"
         if command -v curl >/dev/null 2>&1; then
-            curl -fsSL "$tarball" -o "$tmp/src.tgz" && got=1 && break
+            curl -fsSL "$tarball" -o "$tmp/src.tgz" && got=1 && SOURCE_BRANCH="$branch" && break
         else
-            wget -qO "$tmp/src.tgz" "$tarball" && got=1 && break
+            wget -qO "$tmp/src.tgz" "$tarball" && got=1 && SOURCE_BRANCH="$branch" && break
         fi
         warn "Ветка '$branch' недоступна, пробую следующую."
     done
@@ -287,6 +288,10 @@ deploy() {
         rm -rf "$SRC_DIR/tests"
         cp -a "$PAYLOAD_DIR/tests" "$SRC_DIR/tests"
     fi
+    # откуда ставили — туда же потом смотрит 'ovpnctl update'
+    if [ -n "$SOURCE_BRANCH" ]; then
+        printf 'repo=%s\nbranch=%s\n' "$REPO_URL" "$SOURCE_BRANCH" > "$SRC_DIR/SOURCE"
+    fi
     chmod -R go-w "$SRC_DIR"
 
     cat > "$BIN_PATH" <<'WRAP'
@@ -320,10 +325,22 @@ run_setup() {
     # Повторный запуск на уже настроенном сервере = обновление кода без переустановки
     if [ -f "$ETC_DIR/config.json" ]; then
         ok "Найдена существующая конфигурация ($ETC_DIR/config.json) — сервер не пересоздавался."
+        local output changed
+        if output="$("$BIN_PATH" update --finish 2>&1)"; then
+            changed="$(printf '%s\n' "$output" | sed -n 's/^\* //p' | paste -sd, - | sed 's/,/, /g')"
+            if [ -n "$changed" ]; then
+                ok "Обновлены файлы сервера: $changed — OpenVPN перезапущен."
+            else
+                ok "Конфигурация сервера не изменилась, подключения не прерывались."
+            fi
+        else
+            warn "Не удалось применить конфигурацию: $output"
+            warn "Повторите: ovpnctl update --finish"
+        fi
         info "Меню открыто в другой сессии? Выйдите из него (0) и запустите 'ovpnctl' заново —"
         info "уже запущенный процесс работает со старым кодом."
-        info "Применить обновление к конфигу:  ovpnctl server rebuild"
-        info "Поставить заново с нуля:         ovpnctl uninstall -y, затем эта же команда"
+        info "Дальнейшие обновления:    ovpnctl update"
+        info "Поставить заново с нуля:  ovpnctl uninstall -y, затем эта же команда"
         "$BIN_PATH" status || true
         return 0
     fi

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 
+from . import __version__
 from .util import OvpnError, ensure_dir, write_file
 
 # Префикс путей: используется тестами (OVPNCTL_ROOT=/tmp/sandbox), в бою пустой.
@@ -55,7 +56,7 @@ DEFAULTS = {
     "renew_crl_before": 365,
     "auto_renew_clients": True,
     "installed_at": "",
-    "version": "1.0.0",
+    "version": __version__,
 }
 
 

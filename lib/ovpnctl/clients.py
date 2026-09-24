@@ -9,6 +9,7 @@ import shutil
 from . import config as cfgmod
 from . import pki
 from . import server as srv
+from . import traffic
 from .util import OvpnError, ensure_dir, read_file, warn, write_file
 
 PROFILE_HEADER = """client
@@ -158,6 +159,7 @@ def delete(name: str, cfg: dict) -> None:
             os.unlink(path)
     db["clients"].pop(name, None)
     pki.db_save(db)
+    traffic.forget(name)
 
 
 def renew(name: str, cfg: dict, days: int = None, new_key: bool = False) -> dict:
@@ -226,7 +228,9 @@ def known_addresses() -> dict:
 def listing(cfg: dict) -> list:
     """Сводка по всем клиентам с актуальными сроками и адресами."""
     db = pki.db_load()
-    online = {c["name"]: c.get("virtual_address", "") for c in srv.online_clients()}
+    sessions = srv.online_clients()
+    online = {c["name"]: c.get("virtual_address", "") for c in sessions}
+    usage = traffic.totals(sessions)
     pool = known_addresses()
     rows = []
     for name in sorted(db["clients"]):
@@ -242,6 +246,7 @@ def listing(cfg: dict) -> list:
                 status = "истёк"
         # что показать в колонке адреса: закреплённый → текущий → последний выданный
         address = meta.get("static_ip") or online.get(name) or pool.get(name, "")
+        used = usage.get(name, {"rx": 0, "tx": 0, "total": 0})
         rows.append({
             "name": name,
             "status": status,
@@ -250,5 +255,8 @@ def listing(cfg: dict) -> list:
             "static_ip": meta.get("static_ip", ""),
             "address": address,
             "created": meta.get("created", "")[:10],
+            "traffic_rx": used["rx"],
+            "traffic_tx": used["tx"],
+            "traffic_total": used["total"],
         })
     return rows

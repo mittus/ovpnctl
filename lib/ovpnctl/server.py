@@ -26,6 +26,11 @@ FIREWALL_SCRIPT = os.path.join(cfgmod.ETC_DIR, "firewall.sh")
 CCD_DIR = os.path.join(cfgmod.SERVER_DIR, "ccd")
 # ipp.txt держим рядом с конфигом: каталог разрешён профилем AppArmor openvpn
 IPP_FILE = os.path.join(cfgmod.SERVER_DIR, "ipp.txt")
+# Учёт трафика: по отключению клиента openvpn (уже как nobody) дописывает
+# байты сессии в журнал, ovpnctl потом сворачивает его в traffic.json
+TRAFFIC_SCRIPT = os.path.join(cfgmod.SERVER_DIR, "ovpnctl-traffic.sh")
+TRAFFIC_DIR = os.path.join(cfgmod.SERVER_DIR, "traffic")
+TRAFFIC_LOG = os.path.join(TRAFFIC_DIR, "sessions.log")
 
 
 # --------------------------------------------------------------------------- #
@@ -76,6 +81,9 @@ def build_server_conf(cfg: dict) -> str:
         "persist-tun",
         "user nobody",
         "group %s" % group,
+        "",
+        "script-security 2",
+        "client-disconnect %s" % TRAFFIC_SCRIPT,
         "",
         "status %s 10" % cfgmod.STATUS_FILE,
         "status-version 2",
@@ -131,10 +139,26 @@ def deploy_pki_to_server(cfg: dict) -> None:
 
     if not os.path.exists(IPP_FILE):
         write_file(IPP_FILE, "", 0o644)
-    try:
-        shutil.chown(IPP_FILE, "nobody", openvpn_group())
-    except (LookupError, PermissionError):
-        pass
+    ensure_dir(TRAFFIC_DIR, 0o750)
+    for path in (IPP_FILE, TRAFFIC_DIR):
+        try:
+            shutil.chown(path, "nobody", openvpn_group())
+        except (LookupError, PermissionError):
+            pass
+    write_traffic_script()
+
+
+TRAFFIC_TEMPLATE = """#!/bin/sh
+# Сгенерировано ovpnctl. Вызывается openvpn при отключении клиента:
+# байты завершённой сессии (со стороны сервера) дописываются в журнал.
+printf '%s,%s,%s\\n' "$common_name" "${{bytes_received:-0}}" "${{bytes_sent:-0}}" >> {log}
+exit 0
+"""
+
+
+def write_traffic_script() -> str:
+    write_file(TRAFFIC_SCRIPT, TRAFFIC_TEMPLATE.format(log=TRAFFIC_LOG), 0o755)
+    return TRAFFIC_SCRIPT
 
 
 def write_server_conf(cfg: dict) -> str:
@@ -474,3 +498,34 @@ def setup_networking(cfg: dict) -> None:
     write_firewall_script(cfg)
     write_systemd_dropin()
     configure_ufw(cfg)
+
+
+def refresh_generated(cfg: dict) -> list:
+    """Перегенерирует файлы сервера после обновления кода.
+
+    Службы перезапускаются, только если их файлы действительно изменились:
+    обновление без изменений в конфиге не рвёт подключённых клиентов.
+    """
+    watched = {
+        "server.conf": cfgmod.server_conf_path(),
+        "firewall.sh": FIREWALL_SCRIPT,
+        "drop-in": os.path.join(DROPIN_DIR, "ovpnctl.conf"),
+    }
+
+    def snapshot():
+        return {key: read_file(path) if os.path.exists(path) else None
+                for key, path in watched.items()}
+
+    before = snapshot()
+    deploy_pki_to_server(cfg)
+    write_server_conf(cfg)
+    write_firewall_script(cfg)
+    write_systemd_dropin()
+    after = snapshot()
+    changed = [key for key in watched if before[key] != after[key]]
+
+    if "firewall.sh" in changed:
+        systemctl("restart", cfgmod.FIREWALL_UNIT, check=False)
+    if changed and service_active(cfgmod.SERVICE):
+        restart()
+    return changed

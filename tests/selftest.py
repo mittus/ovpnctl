@@ -18,6 +18,7 @@ os.environ["OVPNCTL_ROOT"] = SANDBOX
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
 from ovpnctl import clients, pki, renew as renew_mod, server as srv  # noqa: E402
+from ovpnctl import traffic, update as update_mod  # noqa: E402
 from ovpnctl import config as cfgmod  # noqa: E402
 from ovpnctl.util import run  # noqa: E402
 
@@ -90,6 +91,9 @@ def main():
     for directive in ("tls-crypt", "crl-verify", "dh none", "topology subnet",
                       "server 10.8.0.0 255.255.255.0", "data-ciphers"):
         check("server.conf содержит '%s'" % directive, directive in conf)
+    check("server.conf вызывает скрипт учёта трафика",
+          "client-disconnect %s" % srv.TRAFFIC_SCRIPT in conf and "script-security 2" in conf)
+    check("скрипт учёта трафика исполняемый", os.access(srv.TRAFFIC_SCRIPT, os.X_OK))
     fw = open(srv.write_firewall_script(cfg)).read()
     check("правило MASQUERADE в firewall.sh", "MASQUERADE" in fw and "10.8.0.0/24" in fw)
 
@@ -194,6 +198,68 @@ def main():
     check("клиент распознан в status-файле",
           online and online[0]["name"] == "alice" and online[0]["bytes_received"] == 12345,
           str(online))
+
+    print("\n== Учёт трафика ==")
+    # сессия, завершённая openvpn: прогоняем настоящий client-disconnect-скрипт
+    env = dict(os.environ, common_name="alice", bytes_received="1000", bytes_sent="5000")
+    run([srv.TRAFFIC_SCRIPT], env=env)
+    env.update(bytes_received="24", bytes_sent="16")
+    run([srv.TRAFFIC_SCRIPT], env=env)
+    with open(srv.TRAFFIC_LOG, "a") as fh:
+        fh.write("битая строка\n")
+    usage = traffic.totals([])
+    check("прошлые сессии сложены", usage.get("alice", {}).get("total") == 6040, str(usage))
+    check("журнал сессий свёрнут", not os.path.exists(srv.TRAFFIC_LOG))
+    check("повторный сбор не удваивает", traffic.totals([])["alice"]["total"] == 6040)
+    row = [r for r in clients.listing(cfg) if r["name"] == "alice"][0]
+    check("в списке клиентов трафик = прошлые + текущая сессия",
+          row["traffic_total"] == 6040 + 12345 + 6789 and row["traffic_rx"] == 1024 + 12345,
+          str(row))
+    run([srv.TRAFFIC_SCRIPT], env=dict(env, common_name="carol"))
+    clients.delete("carol", cfg)
+    check("после удаления клиента его статистика сброшена", "carol" not in traffic.totals([]))
+
+    print("\n== Обновление ovpnctl ==")
+    repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    finished = []
+    real_new_code = update_mod._new_code
+
+    def fake_new_code(*args, **kwargs):
+        if "--finish" in args:              # применение конфигов требует root — имитируем
+            finished.append(args)
+            return run(["echo", "* server.conf"], check=False)
+        return real_new_code(*args, **kwargs)
+
+    update_mod._new_code = fake_new_code
+    result = update_mod.run(local=repo)
+    check("первое обновление ставит код", result["updated"]
+          and os.path.exists(os.path.join(update_mod.SRC_DIR, "lib", "ovpnctl", "update.py")))
+    check("сборка установленного кода совпадает с источником",
+          update_mod.fingerprint(os.path.join(update_mod.SRC_DIR, "lib"))
+          == update_mod.fingerprint(os.path.join(repo, "lib")))
+    check("версия берётся из VERSION", result["latest"]["version"] == open(
+        os.path.join(repo, "VERSION")).read().strip())
+    check("после подмены конфиги применяет новый код", finished and result["changed"] == ["server.conf"])
+    check("повторный запуск ничего не делает", not update_mod.run(local=repo)["updated"])
+    check("--check не ставит", not update_mod.run(local=repo, check_only=True, force=True)["updated"])
+    broken = os.path.join(SANDBOX, "broken")
+    shutil.copytree(repo, broken, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    with open(os.path.join(broken, "lib", "ovpnctl", "__main__.py"), "w") as fh:
+        fh.write("raise SystemExit(3)\n")
+    try:
+        update_mod.run(local=broken)
+        refused = False
+    except Exception:
+        refused = True
+    check("неработающая версия не ставится", refused and update_mod.fingerprint(
+        os.path.join(update_mod.SRC_DIR, "lib")) == update_mod.fingerprint(os.path.join(repo, "lib")))
+    tarball = shutil.make_archive(os.path.join(SANDBOX, "ovpnctl-master"), "gztar",
+                                  root_dir=os.path.dirname(broken), base_dir="broken")
+    check("из архива тоже читается", update_mod.run(local=tarball, check_only=True)["latest"]["build"]
+          == update_mod.fingerprint(os.path.join(broken, "lib")))
+    update_mod._new_code = real_new_code
+    check("по умолчанию источник — github.com/mittus/ovpnctl",
+          update_mod.source()["repo"] == "https://github.com/mittus/ovpnctl")
 
     print("\n== Резервная копия ==")
     from ovpnctl import provision

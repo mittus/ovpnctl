@@ -12,7 +12,7 @@
 ## Установка
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/mittus/openvpn/master/install.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/mittus/ovpnctl/master/install.sh)
 ```
 
 | Параметр | Значение |
@@ -35,7 +35,7 @@ ovpnctl doctor                             # самодиагностика: с�
 
 ovpnctl client add <name>                  # новый клиент + профиль .ovpn
 ovpnctl client add <name> --days 365 --ip 10.8.0.50
-ovpnctl client list                        # таблица клиентов и сроков
+ovpnctl client list                        # таблица клиентов: сроки, адрес, общий трафик
 ovpnctl client show <name>                 # вывести .ovpn в консоль
 ovpnctl client renew <name>                # продлить сертификат
 ovpnctl client revoke <name>               # отозвать (CRL + разрыв сессии)
@@ -48,8 +48,27 @@ ovpnctl set --endpoint vpn.example.com --port 443 --proto tcp --dns 9.9.9.9
 ovpnctl ufw [--install] [--ssh] [--remove] # разрешить порт VPN в ufw
 ovpnctl pki check|info|renew [--force]
 ovpnctl backup                             # архив PKI + профилей + конфига
+ovpnctl update [--check]                   # обновить ovpnctl из GitHub без переустановки
 ovpnctl uninstall [--keep-pki] [--purge]
 ```
+
+---
+
+## Обновление
+
+```bash
+ovpnctl update           # или пункт 17 в меню
+ovpnctl update --check   # только узнать, есть ли новая сборка
+```
+
+Скачивает свежий код из репозитория, откуда ставили (по умолчанию
+`github.com/mittus/ovpnctl`, ветка `master`), и подменяет `/opt/ovpnctl`. Пакеты, PKI,
+клиенты и настройки не трогаются. Затем новый код перегенерирует `server.conf`,
+`firewall.sh` и юниты; OpenVPN перезапускается, только если эти файлы действительно
+изменились. Неработающая сборка не ставится — перед подменой она пробно запускается.
+
+Параметры: `--branch <ветка>`, `--repo <url>`, `--from <каталог или .tar.gz>` (без сети),
+`--force` (переставить ту же сборку). Повторный запуск `install.sh` тоже обновляет код.
 
 ---
 
@@ -125,6 +144,7 @@ cat /var/log/ovpnctl/renew.log
 /etc/ovpnctl/profiles/        мастер-копии .ovpn (режим 0600, только root)
 ~/ovpnctl/                    выгруженные профили того, кто выполнял команду (владелец — он же)
 /etc/ovpnctl/firewall.sh      правила NAT/forward (применяет ovpnctl-firewall.service)
+/etc/ovpnctl/traffic.json     накопленный трафик клиентов по завершённым сессиям
 /etc/ovpnctl/server.extra.conf   (опционально) свои директивы, добавляются в конец server.conf
 /etc/openvpn/server/          рабочая копия конфига и материалов PKI для демона
 /var/log/ovpnctl/renew.log    журнал автопродления
@@ -152,6 +172,11 @@ cat /var/log/ovpnctl/renew.log
   status-файл и management-сокет.
 * **Отзыв мгновенный.** `client revoke` обновляет CRL и через management-сокет рвёт
   текущую сессию клиента.
+* **Общий трафик клиента.** При отключении клиента openvpn вызывает
+  `/etc/openvpn/server/ovpnctl-traffic.sh` (`client-disconnect`), и тот дописывает байты
+  сессии в `/etc/openvpn/server/traffic/sessions.log`. `ovpnctl` сворачивает журнал в
+  `/etc/ovpnctl/traffic.json` и прибавляет текущую сессию из status-файла. Счётчик
+  копится за всё время и сбрасывается только при `client delete`.
 
 ## Проверка кода
 

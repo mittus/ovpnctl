@@ -89,6 +89,25 @@ chk "ovpnctl работает после обновления" "ovpnctl --versio
 [ "$CA_BEFORE" = "$(openssl x509 -in /etc/ovpnctl/pki/ca.crt -noout -fingerprint)" ] \
   && ok "PKI не тронут" || bad "PKI перезаписан"
 chk "профиль клиента на месте" "test -s /etc/ovpnctl/profiles/first.ovpn"
+chk "повторный запуск применил конфиг без ошибок" "! grep -q 'Не удалось применить' /var/log/install-upd.log"
+
+echo; echo "=== ovpnctl update (без переустановки) ==="
+chk "install.sh запомнил источник" "grep -q 'repo=http://127.0.0.1:8000/repo' /opt/ovpnctl/SOURCE"
+ovpnctl update > /var/log/update1.log 2>&1 && ok "ovpnctl update отработал" \
+    || { bad "ovpnctl update"; tail -15 /var/log/update1.log; }
+chk "та же сборка — обновлять нечего" "grep -q 'Обновлять нечего' /var/log/update1.log"
+sed -i 's/ovpnctl — управление OpenVPN/ЗАМЕНЁННЫЙ ЗАГОЛОВОК/' /opt/ovpnctl/lib/ovpnctl/cli.py
+ovpnctl update --check > /var/log/update2.log 2>&1
+chk "--check видит новую сборку" "grep -q 'Есть обновление' /var/log/update2.log"
+chk "--check ничего не меняет" "grep -q 'ЗАМЕНЁННЫЙ ЗАГОЛОВОК' /opt/ovpnctl/lib/ovpnctl/cli.py"
+ovpnctl update > /var/log/update3.log 2>&1 && ok "ovpnctl update поставил сборку" \
+    || { bad "ovpnctl update"; tail -15 /var/log/update3.log; }
+sed 's/^/    /' /var/log/update3.log
+chk "изменённый файл заменён из репозитория" "! grep -q 'ЗАМЕНЁННЫЙ ЗАГОЛОВОК' /opt/ovpnctl/lib/ovpnctl/cli.py"
+chk "конфиг не менялся — сервер не перезапускали" "grep -q 'не изменилась' /var/log/update3.log"
+chk "временных каталогов не осталось" "[ ! -e /opt/ovpnctl/lib.new ] && [ ! -e /opt/ovpnctl/lib.old ]"
+[ "$CA_BEFORE" = "$(openssl x509 -in /etc/ovpnctl/pki/ca.crt -noout -fingerprint)" ] \
+  && ok "PKI не тронут обновлением" || bad "PKI перезаписан обновлением"
 
 echo; echo "=== сервер, где OpenVPN уже стоял вручную ==="
 cp /src/install.sh /tmp/install.sh

@@ -350,10 +350,11 @@ def uninstall(keep_pki: bool = False, purge_packages: bool = False) -> None:
         os.path.join(cfgmod.SERVER_DIR, "crl.pem"),
         os.path.join(cfgmod.SERVER_DIR, "tc.key"),
         os.path.join(cfgmod.SERVER_DIR, "ipp.txt"),
+        srv.TRAFFIC_SCRIPT,
     ):
         if os.path.exists(path):
             os.unlink(path)
-    for directory in (srv.DROPIN_DIR, srv.CCD_DIR):
+    for directory in (srv.DROPIN_DIR, srv.CCD_DIR, srv.TRAFFIC_DIR):
         if os.path.isdir(directory):
             shutil.rmtree(directory, ignore_errors=True)
     daemon_reload()
