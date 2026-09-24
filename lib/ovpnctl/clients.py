@@ -41,11 +41,11 @@ def _pem_block(tag: str, path: str) -> str:
 
 def profile_text(name: str, cfg: dict) -> str:
     if not pki.exists(name):
-        raise OvpnError("клиент '%s' не найден." % name)
+        raise OvpnError("client '%s' not found." % name)
     crt = pki.cert_path(name)
     key = pki.key_path(name)
     if not os.path.exists(key):
-        raise OvpnError("нет приватного ключа клиента '%s' (профиль не восстановить)." % name)
+        raise OvpnError("no private key for client '%s' (profile cannot be rebuilt)." % name)
 
     head = PROFILE_HEADER.format(
         dev=cfg.get("dev", "tun"),
@@ -86,7 +86,7 @@ def regenerate_all_profiles(cfg: dict) -> list:
             write_profile(name, cfg)
             updated.append(name)
         except OvpnError as exc:
-            warn("профиль '%s' не перегенерирован: %s" % (name, exc))
+            warn("profile '%s' not regenerated: %s" % (name, exc))
     return updated
 
 
@@ -97,10 +97,10 @@ def add(name: str, cfg: dict, days: int = None, static_ip: str = None) -> dict:
     pki.valid_name(name)
     db = pki.db_load()
     if name in db["clients"] and not db["clients"][name].get("revoked"):
-        raise OvpnError("клиент '%s' уже существует (посмотреть профиль: "
+        raise OvpnError("client '%s' already exists (view profile: "
                         "ovpnctl client show %s)." % (name, name))
     if pki.exists(name):
-        raise OvpnError("сертификат '%s' уже выпущен — сначала отзовите или удалите его." % name)
+        raise OvpnError("certificate '%s' already issued — revoke or remove it first." % name)
 
     days = int(days or cfg["client_days"])
     pki.issue(name, "client_cert", days, cfg)
@@ -127,9 +127,9 @@ def add(name: str, cfg: dict, days: int = None, static_ip: str = None) -> dict:
 def revoke(name: str, cfg: dict) -> None:
     db = pki.db_load()
     if name not in db["clients"]:
-        raise OvpnError("клиент '%s' не найден." % name)
+        raise OvpnError("client '%s' not found." % name)
     if db["clients"][name].get("revoked"):
-        raise OvpnError("клиент '%s' уже отозван." % name)
+        raise OvpnError("client '%s' is already revoked." % name)
     pki.revoke(name, cfg)
     srv.reload_crl()
     srv.kill_client(name)                       # рвём активную сессию, если есть
@@ -168,9 +168,9 @@ def renew(name: str, cfg: dict, days: int = None, new_key: bool = False) -> dict
     db = pki.db_load()
     meta = db["clients"].get(name)
     if not meta:
-        raise OvpnError("клиент '%s' не найден." % name)
+        raise OvpnError("client '%s' not found." % name)
     if meta.get("revoked"):
-        raise OvpnError("клиент '%s' отозван — продление невозможно." % name)
+        raise OvpnError("client '%s' is revoked — cannot renew." % name)
 
     days = int(days or meta.get("days") or cfg["client_days"])
     old = pki.cert_path(name)
@@ -197,7 +197,7 @@ def set_static_ip(name: str, address: str, cfg: dict) -> str:
     net = ipaddress.IPv4Network(cfgmod.network_cidr(cfg))
     addr = ipaddress.IPv4Address(address)
     if addr not in net:
-        raise OvpnError("адрес %s вне VPN-подсети %s." % (address, net))
+        raise OvpnError("address %s is outside VPN subnet %s." % (address, net))
     ensure_dir(srv.CCD_DIR, 0o755)
     path = os.path.join(srv.CCD_DIR, name)
     write_file(path, "ifconfig-push %s %s\n" % (addr, net.netmask), 0o644)
@@ -228,25 +228,22 @@ def known_addresses() -> dict:
 def listing(cfg: dict) -> list:
     """Сводка по всем клиентам с актуальными сроками и адресами."""
     db = pki.db_load()
-    sessions = srv.online_clients()
-    online = {c["name"]: c.get("virtual_address", "") for c in sessions}
-    usage = traffic.totals(sessions)
+    online = {c["name"]: c.get("virtual_address", "") for c in srv.online_clients()}
     pool = known_addresses()
     rows = []
     for name in sorted(db["clients"]):
         meta = db["clients"][name]
         revoked = bool(meta.get("revoked"))
-        status = "отозван" if revoked else ("онлайн" if name in online else "офлайн")
+        status = "revoked" if revoked else ("online" if name in online else "offline")
         left = None
         expires = meta.get("expires", "")
         if not revoked and pki.exists(name):
             left = pki.days_left(pki.cert_path(name))
             expires = pki.not_after(pki.cert_path(name)).strftime("%Y-%m-%d")
             if left < 0:
-                status = "истёк"
+                status = "expired"
         # что показать в колонке адреса: закреплённый → текущий → последний выданный
         address = meta.get("static_ip") or online.get(name) or pool.get(name, "")
-        used = usage.get(name, {"rx": 0, "tx": 0, "total": 0})
         rows.append({
             "name": name,
             "status": status,
@@ -255,8 +252,5 @@ def listing(cfg: dict) -> list:
             "static_ip": meta.get("static_ip", ""),
             "address": address,
             "created": meta.get("created", "")[:10],
-            "traffic_rx": used["rx"],
-            "traffic_tx": used["tx"],
-            "traffic_total": used["total"],
         })
     return rows

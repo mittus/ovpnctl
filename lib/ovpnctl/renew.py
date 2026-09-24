@@ -88,7 +88,7 @@ def check(cfg: dict) -> dict:
         if db["clients"][name].get("revoked"):
             continue
         if not pki.exists(name):
-            report["problems"].append("клиент %s: сертификат отсутствует" % name)
+            report["problems"].append("client %s: certificate missing" % name)
             continue
         add("client", name, pki.cert_path(name), cfg["renew_client_before"])
 
@@ -96,9 +96,9 @@ def check(cfg: dict) -> dict:
     report["service_active"] = service_active(cfgmod.SERVICE)
     report["timer_active"] = service_active(cfgmod.RENEW_TIMER)
     if not report["service_active"]:
-        report["problems"].append("служба %s не запущена" % cfgmod.SERVICE)
+        report["problems"].append("service %s is not running" % cfgmod.SERVICE)
     if not report["timer_active"]:
-        report["problems"].append("таймер автопродления %s не активен" % cfgmod.RENEW_TIMER)
+        report["problems"].append("auto-renewal timer %s is not active" % cfgmod.RENEW_TIMER)
     return report
 
 
@@ -129,23 +129,23 @@ def run(cfg: dict, force: bool = False, quiet: bool = False) -> dict:
         pki.gen_crl(cfg)
         srv.reload_crl()
         actions["crl"] = True
-        log("CRL перевыпущен (действует до %s)" % pki.crl_next_update().strftime("%Y-%m-%d"))
-        say("CRL перевыпущен до %s" % pki.crl_next_update().strftime("%Y-%m-%d"))
+        log("CRL reissued (valid until %s)" % pki.crl_next_update().strftime("%Y-%m-%d"))
+        say("CRL reissued until %s" % pki.crl_next_update().strftime("%Y-%m-%d"))
 
     # 2. CA — перевыпуск тем же ключом, цепочка и клиентские сертификаты остаются валидны
     ca_days = pki.days_left(pki.CA_CRT)
     if force or ca_days < int(cfg["renew_ca_before"]):
         result = pki.renew_ca(cfg)
         actions["ca"] = True
-        log("CA перевыпущен тем же ключом, действует до %s (старый сохранён: %s). "
-            "Уже розданные профили работают, пока не истечёт их копия CA (%s) — "
-            "раздайте обновлённые .ovpn до этой даты"
+        log("CA reissued with the same key, valid until %s (old one saved: %s). "
+            "Already distributed profiles keep working until their CA copy expires (%s) — "
+            "distribute updated .ovpn files before that date"
             % (result["not_after"][:10], os.path.basename(result["archived"]),
                pki.not_after(result["archived"]).strftime("%Y-%m-%d")))
         if not pki.old_ca_still_trusts(pki.SERVER_NAME):
-            log("ВНИМАНИЕ: старая копия CA больше не проверяет серверный сертификат — "
-                "клиентам нужно обновить профили немедленно")
-        say("CA перевыпущен до %s" % result["not_after"][:10])
+            log("WARNING: the old CA copy no longer verifies the server certificate — "
+                "clients must update their profiles immediately")
+        say("CA reissued until %s" % result["not_after"][:10])
         # профили содержат CA-бандл => обновляем их все
         actions["profiles"] = clients.regenerate_all_profiles(cfg)
         # CRL подписан ключом CA — перевыпускаем, чтобы дата была свежей
@@ -158,9 +158,9 @@ def run(cfg: dict, force: bool = False, quiet: bool = False) -> dict:
     if force or server_days < int(cfg["renew_server_before"]):
         renew_server(cfg)
         actions["server"] = True
-        log("Серверный сертификат перевыпущен, действует до %s"
+        log("Server certificate reissued, valid until %s"
             % pki.not_after(server_crt).strftime("%Y-%m-%d"))
-        say("Серверный сертификат перевыпущен до %s"
+        say("Server certificate reissued until %s"
             % pki.not_after(server_crt).strftime("%Y-%m-%d"))
 
     # 4. Клиентские сертификаты
@@ -178,28 +178,28 @@ def run(cfg: dict, force: bool = False, quiet: bool = False) -> dict:
                            int(cfg["renew_client_before"]) * 2)
                 res = clients.renew(name, cfg, days=days)
                 actions["clients"].append(name)
-                log("Клиент '%s' продлён до %s — профиль обновлён (%s), клиенту нужно "
-                    "переимпортировать .ovpn до истечения старого сертификата"
+                log("Client '%s' renewed until %s — profile updated (%s), the client must "
+                    "re-import the .ovpn before the old certificate expires"
                     % (name, res["expires"][:10], res["profile"]))
-                say("Клиент '%s' продлён до %s" % (name, res["expires"][:10]))
+                say("Client '%s' renewed until %s" % (name, res["expires"][:10]))
 
     # 5. Применяем изменения на сервере
     if actions["ca"] or actions["server"]:
         srv.deploy_pki_to_server(cfg)
         srv.restart()
         actions["restarted"] = True
-        log("Служба %s перезапущена после обновления PKI" % cfgmod.SERVICE)
+        log("Service %s restarted after PKI update" % cfgmod.SERVICE)
     elif actions["crl"]:
         srv.reload_crl()
 
     # 6. Служба должна работать
     if not service_active(cfgmod.SERVICE):
-        warn("Служба %s не активна — пробую запустить." % cfgmod.SERVICE)
+        warn("Service %s is not active — trying to start it." % cfgmod.SERVICE)
         systemctl("restart", cfgmod.SERVICE, check=False)
-        log("Служба была неактивна, выполнен restart")
+        log("Service was inactive, restart performed")
 
     if not any([actions["ca"], actions["server"], actions["crl"], actions["clients"]]):
-        log("Проверка выполнена, продление не требуется")
+        log("Check completed, no renewal needed")
     return actions
 
 

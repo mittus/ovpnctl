@@ -35,17 +35,17 @@ trap cleanup EXIT
 info()  { printf '%s %s%s%s\n' "$LOG_TAG" "$C_INFO" "$*" "$C_OFF"; }
 ok()    { printf '%s %s%s%s\n' "$LOG_TAG" "$C_OK"   "$*" "$C_OFF"; }
 warn()  { printf '%s %s%s%s\n' "$LOG_TAG" "$C_WARN" "$*" "$C_OFF" >&2; }
-die()   { printf '%s %s%s%s\n' "$LOG_TAG" "$C_ERR"  "ОШИБКА: $*" "$C_OFF" >&2; exit 1; }
+die()   { printf '%s %s%s%s\n' "$LOG_TAG" "$C_ERR"  "ERROR: $*" "$C_OFF" >&2; exit 1; }
 
 # --------------------------------------------------------------------------- #
 # 1. Предполётные проверки
 # --------------------------------------------------------------------------- #
 require_root() {
-    [ "$(id -u)" -eq 0 ] || die "нужны права root (запустите через sudo)."
+    [ "$(id -u)" -eq 0 ] || die "root privileges required (run with sudo)."
 }
 
 detect_os() {
-    [ -r /etc/os-release ] || die "не найден /etc/os-release — дистрибутив не поддерживается."
+    [ -r /etc/os-release ] || die "/etc/os-release not found — unsupported distribution."
     # shellcheck disable=SC1091
     . /etc/os-release
     OS_ID="${ID:-unknown}"
@@ -58,56 +58,56 @@ detect_os() {
         debian)
             MAJOR="${OS_VER%%.*}"
             if [ "${MAJOR:-0}" -lt 10 ] 2>/dev/null; then
-                die "Debian $OS_VER не поддерживается (нужен 10+)."
+                die "Debian $OS_VER is not supported (10+ required)."
             fi
             if [ "${MAJOR:-0}" -eq 10 ] 2>/dev/null; then
-                warn "Debian 10 снят с поддержки: обновления безопасности не выходят,"
-                warn "а пакеты доступны только из archive.debian.org. Рекомендуется обновиться до 12."
+                warn "Debian 10 is end-of-life: no more security updates,"
+                warn "and packages are only available from archive.debian.org. Upgrading to 12 is recommended."
             fi
             if [ "${MAJOR:-0}" -gt 13 ] 2>/dev/null; then
-                warn "Debian $OS_VER новее протестированных — продолжаю."
+                warn "Debian $OS_VER is newer than tested versions — continuing."
             fi
             ;;
         ubuntu)
             MAJOR="${OS_VER%%.*}"
             if [ "${MAJOR:-0}" -lt 20 ] 2>/dev/null; then
-                die "Ubuntu $OS_VER не поддерживается (нужен 20.04+)."
+                die "Ubuntu $OS_VER is not supported (20.04+ required)."
             fi
             ;;
         *)
             case " $OS_LIKE " in
-                *debian*) warn "Дистрибутив '$OS_ID' не тестировался, но он debian-совместимый — продолжаю." ;;
-                *) die "дистрибутив '$OS_ID' не поддерживается (нужен Debian/Ubuntu или производный)." ;;
+                *debian*) warn "Distribution '$OS_ID' is untested but Debian-compatible — continuing." ;;
+                *) die "distribution '$OS_ID' is not supported (Debian/Ubuntu or a derivative required)." ;;
             esac
             ;;
     esac
-    ok "Система: $OS_NAME ($(uname -m), ядро $(uname -r))"
+    ok "System: $OS_NAME ($(uname -m), kernel $(uname -r))"
 }
 
 preflight() {
-    command -v apt-get >/dev/null 2>&1 || die "не найден apt-get — поддерживаются только apt-based системы."
+    command -v apt-get >/dev/null 2>&1 || die "apt-get not found — only apt-based systems are supported."
 
     # TUN/TAP
     if [ ! -c /dev/net/tun ]; then
-        info "Устройство /dev/net/tun отсутствует, пробую загрузить модуль tun…"
+        info "/dev/net/tun is missing, trying to load the tun module…"
         modprobe tun 2>/dev/null || true
         sleep 1
     fi
     if [ ! -c /dev/net/tun ]; then
-        die "нет /dev/net/tun. На OpenVZ/LXC включите TUN/TAP у провайдера (KVM работает из коробки)."
+        die "/dev/net/tun is missing. On OpenVZ/LXC ask your provider to enable TUN/TAP (KVM works out of the box)."
     fi
 
     # systemd
-    [ -d /run/systemd/system ] || die "systemd не обнаружен — установка рассчитана на systemd-хосты."
+    [ -d /run/systemd/system ] || die "systemd not detected — the installer requires a systemd host."
 
     # свободное место (нужно ~200 МБ на пакеты)
     local avail
     avail=$(df -Pk / | awk 'NR==2 {print $4}')
     if [ "${avail:-0}" -lt 204800 ]; then
-        warn "На / меньше 200 МБ свободно — установка может не пройти."
+        warn "Less than 200 MB free on / — installation may fail."
     fi
 
-    ok "Предполётные проверки пройдены (/dev/net/tun, systemd, apt)."
+    ok "Preflight checks passed (/dev/net/tun, systemd, apt)."
 }
 
 # --------------------------------------------------------------------------- #
@@ -120,14 +120,14 @@ fix_archived_repos() {
     [ -f "$list" ] || return 1
     grep -qE 'deb\.debian\.org|security\.debian\.org' "$list" || return 1
 
-    warn "Репозитории этого выпуска Debian переехали в archive.debian.org."
+    warn "Repositories for this Debian release have moved to archive.debian.org."
     if [ -t 0 ]; then
-        printf '%s Переключить %s на archive.debian.org? [Y/n]: ' "$LOG_TAG" "$list" >&2
+        printf '%s Switch %s to archive.debian.org? [Y/n]: ' "$LOG_TAG" "$list" >&2
         read -r answer </dev/tty || answer=""
         case "${answer:-y}" in [Nn]*) return 1 ;; esac
     else
         # без терминала не трогаем системные источники — показываем готовую команду
-        warn "Нет терминала: источники не меняю. Выполните вручную и повторите установку:"
+        warn "No terminal: leaving sources unchanged. Run this manually and retry the install:"
         warn "  sed -i -e 's|deb.debian.org|archive.debian.org|g' \\"
         warn "         -e 's|security.debian.org|archive.debian.org|g' \\"
         warn "         -e '/-updates/d' $list && apt-get update"
@@ -142,7 +142,7 @@ fix_archived_repos() {
            -e 's|https://deb.debian.org|http://archive.debian.org|g' \
            -e '/-updates/d' "$list"
     echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99ovpnctl-archive
-    ok "Источники переключены на archive.debian.org (оригинал: $list.ovpnctl.bak)."
+    ok "Sources switched to archive.debian.org (original: $list.ovpnctl.bak)."
     return 0
 }
 
@@ -152,9 +152,9 @@ apt_update_once() {
         if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null; then
             if fix_archived_repos; then
                 DEBIAN_FRONTEND=noninteractive apt-get update -qq \
-                    || warn "apt-get update снова с ошибкой, продолжаю с текущими индексами."
+                    || warn "apt-get update failed again, continuing with current indexes."
             else
-                warn "apt-get update завершился с ошибкой, продолжаю с текущими индексами."
+                warn "apt-get update failed, continuing with current indexes."
             fi
         fi
         _APT_UPDATED=1
@@ -164,7 +164,7 @@ apt_update_once() {
 # Отпечаток кода: по нему видно, обновились ли исходники на самом деле
 code_fingerprint() {
     local dir="$1"
-    [ -d "$dir" ] || { echo "нет"; return; }
+    [ -d "$dir" ] || { echo "none"; return; }
     find "$dir" -type f -name '*.py' -print0 2>/dev/null \
         | LC_ALL=C sort -z | xargs -0 cat 2>/dev/null | md5sum | cut -c1-8
 }
@@ -180,29 +180,29 @@ install_packages() {
     apt_update_once
     for p in "${pkgs[@]}"; do
         if pkg_installed "$p"; then
-            info "пакет уже установлен: $p"
+            info "package already installed: $p"
         else
             to_install+=("$p")
         fi
     done
 
     if [ "${#to_install[@]}" -gt 0 ]; then
-        info "Устанавливаю: ${to_install[*]}"
+        info "Installing: ${to_install[*]}"
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${to_install[@]}" \
-            || die "не удалось установить пакеты: ${to_install[*]}"
+            || die "failed to install packages: ${to_install[*]}"
     fi
 
     # ПЕРЕПРОВЕРКА: каждый пакет реально в системе
     local failed=()
     for p in "${pkgs[@]}"; do pkg_installed "$p" || failed+=("$p"); done
     if [ "${#failed[@]}" -gt 0 ]; then
-        die "после установки отсутствуют пакеты: ${failed[*]}"
+        die "packages still missing after install: ${failed[*]}"
     fi
 
     # ПЕРЕПРОВЕРКА: бинарники на месте и запускаются
     local bins=(openvpn openssl python3 ip iptables)
     for b in "${bins[@]}"; do
-        command -v "$b" >/dev/null 2>&1 || die "бинарник '$b' не найден в PATH после установки."
+        command -v "$b" >/dev/null 2>&1 || die "binary '$b' not found in PATH after install."
     done
 
     # ПЕРЕПРОВЕРКА версий
@@ -215,14 +215,14 @@ install_packages() {
     local py_major py_minor
     py_major=${PY_VER%%.*}; py_minor=${PY_VER##*.}
     if [ "$py_major" -lt 3 ] || { [ "$py_major" -eq 3 ] && [ "$py_minor" -lt 7 ]; }; then
-        die "нужен Python 3.7+, найден $PY_VER."
+        die "Python 3.7+ required, found $PY_VER."
     fi
     case "$OPENVPN_VER" in
         2.[4-9]*|2.[1-9][0-9]*|[3-9].*) : ;;
-        *) die "нужен OpenVPN 2.4+, найден '${OPENVPN_VER:-неизвестно}'." ;;
+        *) die "OpenVPN 2.4+ required, found '${OPENVPN_VER:-unknown}'." ;;
     esac
 
-    ok "Зависимости проверены: openvpn $OPENVPN_VER, openssl $OPENSSL_VER, python3 $PY_VER"
+    ok "Dependencies OK: openvpn $OPENVPN_VER, openssl $OPENSSL_VER, python3 $PY_VER"
 }
 
 # --------------------------------------------------------------------------- #
@@ -234,11 +234,11 @@ fetch_sources() {
 
     if [ -n "$here" ] && [ -d "$here/lib/ovpnctl" ]; then
         PAYLOAD_DIR="$here"
-        info "Использую локальные исходники: $PAYLOAD_DIR"
+        info "Using local sources: $PAYLOAD_DIR"
         return
     fi
 
-    [ -n "$REPO_URL" ] || die "не задан OVPN_REPO_URL (например https://github.com/mittus/ovpnctl)."
+    [ -n "$REPO_URL" ] || die "OVPN_REPO_URL is not set (e.g. https://github.com/mittus/ovpnctl)."
 
     local branches branch tarball got=0 tmp
     TMP_DIR="$(mktemp -d)"; tmp="$TMP_DIR"
@@ -246,17 +246,17 @@ fetch_sources() {
 
     for branch in $branches; do
         tarball="$REPO_URL/archive/refs/heads/$branch.tar.gz"
-        info "Скачиваю исходники: $tarball"
+        info "Downloading sources: $tarball"
         if command -v curl >/dev/null 2>&1; then
             curl -fsSL "$tarball" -o "$tmp/src.tgz" && got=1 && SOURCE_BRANCH="$branch" && break
         else
             wget -qO "$tmp/src.tgz" "$tarball" && got=1 && SOURCE_BRANCH="$branch" && break
         fi
-        warn "Ветка '$branch' недоступна, пробую следующую."
+        warn "Branch '$branch' unavailable, trying the next one."
     done
-    [ "$got" -eq 1 ] || die "не удалось скачать исходники из $REPO_URL (ветки: $branches)."
+    [ "$got" -eq 1 ] || die "failed to download sources from $REPO_URL (branches: $branches)."
 
-    tar -xzf "$tmp/src.tgz" -C "$tmp" || die "битый архив исходников."
+    tar -xzf "$tmp/src.tgz" -C "$tmp" || die "corrupted source archive."
 
     # исходники могут лежать в корне архива или в подкаталоге (OVPN_REPO_SUBDIR)
     if [ -n "$REPO_SUBDIR" ]; then
@@ -266,15 +266,15 @@ fetch_sources() {
         PAYLOAD_DIR="${PAYLOAD_DIR%/lib}"
     fi
     [ -n "$PAYLOAD_DIR" ] && [ -d "$PAYLOAD_DIR/lib/ovpnctl" ] \
-        || die "в архиве не найден каталог lib/ovpnctl."
-    ok "Исходники распакованы: ${PAYLOAD_DIR#$tmp/}"
+        || die "lib/ovpnctl directory not found in the archive."
+    ok "Sources extracted: ${PAYLOAD_DIR#$tmp/}"
 }
 
 # --------------------------------------------------------------------------- #
 # 4. Раскладка файлов
 # --------------------------------------------------------------------------- #
 deploy() {
-    info "Разворачиваю в $SRC_DIR…"
+    info "Deploying to $SRC_DIR…"
     CODE_FP_BEFORE="$(code_fingerprint "$SRC_DIR/lib")"
     install -d -m 0755 "$SRC_DIR" "$ETC_DIR"
     rm -rf "$SRC_DIR/lib"
@@ -296,7 +296,7 @@ deploy() {
 
     cat > "$BIN_PATH" <<'WRAP'
 #!/usr/bin/env bash
-# Обёртка запуска менеджера ovpnctl
+# ovpnctl launcher
 exec /usr/bin/env PYTHONPATH="/opt/ovpnctl/lib${PYTHONPATH:+:$PYTHONPATH}" python3 -m ovpnctl "$@"
 WRAP
     chmod 0755 "$BIN_PATH"
@@ -305,16 +305,16 @@ WRAP
     systemctl daemon-reload
 
     # ПЕРЕПРОВЕРКА: менеджер реально запускается
-    "$BIN_PATH" --version >/dev/null 2>&1 || die "менеджер ovpnctl не запускается после установки."
+    "$BIN_PATH" --version >/dev/null 2>&1 || die "ovpnctl fails to start after install."
 
     local fp_after
     fp_after="$(code_fingerprint "$SRC_DIR/lib")"
-    if [ "$CODE_FP_BEFORE" = "нет" ]; then
-        ok "Файлы разложены ($("$BIN_PATH" --version), сборка $fp_after)"
+    if [ "$CODE_FP_BEFORE" = "none" ]; then
+        ok "Files installed ($("$BIN_PATH" --version), build $fp_after)"
     elif [ "$CODE_FP_BEFORE" = "$fp_after" ]; then
-        ok "Код уже актуален — та же сборка $fp_after, обновлять нечего."
+        ok "Code is already up to date — same build $fp_after, nothing to update."
     else
-        ok "Код обновлён: сборка $CODE_FP_BEFORE → $fp_after"
+        ok "Code updated: build $CODE_FP_BEFORE → $fp_after"
     fi
 }
 
@@ -324,28 +324,28 @@ WRAP
 run_setup() {
     # Повторный запуск на уже настроенном сервере = обновление кода без переустановки
     if [ -f "$ETC_DIR/config.json" ]; then
-        ok "Найдена существующая конфигурация ($ETC_DIR/config.json) — сервер не пересоздавался."
+        ok "Existing configuration found ($ETC_DIR/config.json) — server was not recreated."
         local output changed
         if output="$("$BIN_PATH" update --finish 2>&1)"; then
             changed="$(printf '%s\n' "$output" | sed -n 's/^\* //p' | paste -sd, - | sed 's/,/, /g')"
             if [ -n "$changed" ]; then
-                ok "Обновлены файлы сервера: $changed — OpenVPN перезапущен."
+                ok "Server files updated: $changed — OpenVPN restarted."
             else
-                ok "Конфигурация сервера не изменилась, подключения не прерывались."
+                ok "Server configuration unchanged, connections were not interrupted."
             fi
         else
-            warn "Не удалось применить конфигурацию: $output"
-            warn "Повторите: ovpnctl update --finish"
+            warn "Failed to apply configuration: $output"
+            warn "Retry with: ovpnctl update --finish"
         fi
-        info "Меню открыто в другой сессии? Выйдите из него (0) и запустите 'ovpnctl' заново —"
-        info "уже запущенный процесс работает со старым кодом."
-        info "Дальнейшие обновления:    ovpnctl update"
-        info "Поставить заново с нуля:  ovpnctl uninstall -y, затем эта же команда"
+        info "Menu open in another session? Exit it (0) and run 'ovpnctl' again —"
+        info "an already running process still uses the old code."
+        info "Future updates:        ovpnctl update"
+        info "Reinstall from scratch: ovpnctl uninstall -y, then this same command"
         "$BIN_PATH" status || true
         return 0
     fi
 
-    info "Запускаю настройку сервера…"
+    info "Starting server setup…"
     "$BIN_PATH" setup
 }
 
@@ -358,7 +358,7 @@ main() {
     deploy
     run_setup
     echo
-    ok "Готово. Управление: ovpnctl (интерактивное меню) или ovpnctl --help"
+    ok "Done. Manage with: ovpnctl (interactive menu) or ovpnctl --help"
 }
 
 main "$@"

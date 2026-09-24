@@ -52,7 +52,7 @@ def source(repo: str = None, branch: str = None) -> dict:
 def fingerprint(lib_dir: str) -> str:
     """Отпечаток кода — тот же, что показывает install.sh (md5 всех *.py по порядку путей)."""
     if not os.path.isdir(lib_dir):
-        return "нет"
+        return "none"
     paths = []
     for root, _dirs, files in os.walk(lib_dir):
         paths += [os.path.join(root, f) for f in files if f.endswith(".py")]
@@ -85,7 +85,7 @@ def _safe_extract(archive: str, dest: str) -> None:
         for member in tar.getmembers():
             name = member.name
             if name.startswith("/") or ".." in name.split("/"):
-                raise OvpnError("подозрительный путь в архиве: %s" % name)
+                raise OvpnError("suspicious path in archive: %s" % name)
             if member.isfile() or member.isdir():
                 members.append(member)
         if hasattr(tarfile, "data_filter"):
@@ -98,7 +98,7 @@ def _find_payload(tree: str) -> str:
     for root, dirs, _files in os.walk(tree):
         if os.path.basename(root) == "lib" and "ovpnctl" in dirs:
             return os.path.dirname(root)
-    raise OvpnError("в архиве не найден каталог lib/ovpnctl.")
+    raise OvpnError("lib/ovpnctl directory not found in archive.")
 
 
 def fetch(src: dict, workdir: str, local: str = None) -> dict:
@@ -108,7 +108,7 @@ def fetch(src: dict, workdir: str, local: str = None) -> dict:
         if os.path.isdir(local):
             return {"payload": _find_payload(local), "origin": os.path.abspath(local)}
         if not os.path.exists(local):
-            raise OvpnError("нет такого файла или каталога: %s" % local)
+            raise OvpnError("no such file or directory: %s" % local)
         shutil.copyfile(local, archive)
         origin = os.path.abspath(local)
     else:
@@ -123,13 +123,13 @@ def fetch(src: dict, workdir: str, local: str = None) -> dict:
             except (OSError, ValueError) as exc:
                 errors.append("%s: %s" % (branch, exc))
         if not origin:
-            raise OvpnError("не удалось скачать %s (%s)." % (src["repo"], "; ".join(errors)))
+            raise OvpnError("failed to download %s (%s)." % (src["repo"], "; ".join(errors)))
     tree = os.path.join(workdir, "tree")
     os.makedirs(tree)
     try:
         _safe_extract(archive, tree)
     except (tarfile.TarError, OSError) as exc:
-        raise OvpnError("битый архив исходников: %s" % exc)
+        raise OvpnError("corrupted source archive: %s" % exc)
     return {"payload": _find_payload(tree), "origin": origin}
 
 
@@ -156,7 +156,7 @@ def install_payload(payload: str) -> None:
     probe = _new_code("--version", env_lib=staged)
     if probe.returncode != 0:
         shutil.rmtree(staged, ignore_errors=True)
-        raise OvpnError("новая версия не запускается, обновление отменено:\n%s"
+        raise OvpnError("new version fails to run, update aborted:\n%s"
                         % probe.stdout.strip())
 
     if os.path.isdir(lib):
@@ -191,7 +191,7 @@ def run(repo: str = None, branch: str = None, local: str = None,
     current = {"version": __version__, "build": fingerprint(os.path.join(SRC_DIR, "lib"))}
     workdir = tempfile.mkdtemp(prefix="ovpnctl-update-")
     try:
-        info("Получаю %s…" % (local or "%s (%s)" % (src["repo"], src["branch"] or "master/main")))
+        info("Fetching %s…" % (local or "%s (%s)" % (src["repo"], src["branch"] or "master/main")))
         got = fetch(src, workdir, local)
         latest = {"version": payload_version(got["payload"]),
                   "build": fingerprint(os.path.join(got["payload"], "lib"))}
@@ -211,8 +211,8 @@ def run(repo: str = None, branch: str = None, local: str = None,
     if cfgmod.config_exists():
         done = _new_code("update", "--finish")
         if done.returncode != 0:
-            warn("Код обновлён, но конфигурация не применилась:\n%s" % done.stdout.strip())
-            warn("Повторите: ovpnctl update --finish")
+            warn("Code updated, but configuration was not applied:\n%s" % done.stdout.strip())
+            warn("Retry: ovpnctl update --finish")
         else:
             result["changed"] = [line[2:] for line in done.stdout.splitlines()
                                  if line.startswith("* ")]
@@ -223,9 +223,11 @@ def finish() -> list:
     """Вызывается новым кодом после подмены: юниты, конфиги, версия в config.json."""
     from . import provision
     from . import server as srv
+    from .system import systemctl
 
     cfg = cfgmod.load()
     provision.write_units()
+    systemctl("enable", "--now", cfgmod.TRAFFIC_TIMER, check=False)
     changed = srv.refresh_generated(cfg)
     if cfg.get("version") != __version__:
         cfg["version"] = __version__

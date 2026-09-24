@@ -27,7 +27,7 @@ def os_release() -> dict:
                     key, _, val = line.strip().partition("=")
                     data[key] = val.strip('"')
     except OSError:
-        raise OvpnError("не читается /etc/os-release — неподдерживаемая система.")
+        raise OvpnError("cannot read /etc/os-release — unsupported system.")
     return data
 
 
@@ -57,14 +57,14 @@ def check_supported() -> dict:
         low, high = SUPPORTED[ident]
         if dist["major"] < low:
             raise OvpnError(
-                "%s %s не поддерживается (нужен %s %d+)." % (ident, dist["version"], ident, low)
+                "%s %s is not supported (%s %d+ required)." % (ident, dist["version"], ident, low)
             )
         if dist["major"] > high:
-            warn("%s новее протестированных версий — продолжаю." % dist["pretty"])
+            warn("%s is newer than tested versions — continuing." % dist["pretty"])
     elif "debian" in dist["like"] or "ubuntu" in dist["like"]:
-        warn("Дистрибутив '%s' не тестировался, но он debian-совместимый." % ident)
+        warn("Distribution '%s' is untested, but Debian-compatible." % ident)
     else:
-        raise OvpnError("дистрибутив '%s' не поддерживается (нужен Debian/Ubuntu)." % ident)
+        raise OvpnError("distribution '%s' is not supported (Debian/Ubuntu required)." % ident)
     return dist
 
 
@@ -81,12 +81,12 @@ def apt_install(packages) -> None:
     if not missing:
         return
     env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
-    info("Устанавливаю пакеты: %s" % " ".join(missing))
+    info("Installing packages: %s" % " ".join(missing))
     run(["apt-get", "update", "-qq"], check=False, env=env)
     run(["apt-get", "install", "-y", "-qq", "--no-install-recommends"] + missing, env=env)
     still = [p for p in missing if not pkg_installed(p)]
     if still:
-        raise OvpnError("не удалось установить пакеты: %s" % " ".join(still))
+        raise OvpnError("failed to install packages: %s" % " ".join(still))
 
 
 def verify_dependencies(install: bool = True) -> dict:
@@ -98,31 +98,31 @@ def verify_dependencies(install: bool = True) -> dict:
     missing = [p for p in required_pkgs if not pkg_installed(p)]
     if missing:
         if not install:
-            raise OvpnError("не установлены пакеты: %s" % " ".join(missing))
+            raise OvpnError("packages not installed: %s" % " ".join(missing))
         apt_install(missing)
 
     for binary in ("openvpn", "openssl", "ip", "iptables"):
         if not which(binary):
-            raise OvpnError("бинарник '%s' не найден в PATH." % binary)
+            raise OvpnError("binary '%s' not found in PATH." % binary)
 
     ovpn = openvpn_version()
     if ovpn < (2, 4):
-        raise OvpnError("нужен OpenVPN 2.4+, найден %s." % ".".join(map(str, ovpn)))
+        raise OvpnError("OpenVPN 2.4+ required, found %s." % ".".join(map(str, ovpn)))
     ossl = openssl_version()
     if ossl < (1, 1):
-        raise OvpnError("нужен OpenSSL 1.1+, найден %s." % ".".join(map(str, ossl)))
+        raise OvpnError("OpenSSL 1.1+ required, found %s." % ".".join(map(str, ossl)))
 
     unit_paths = ["/lib/systemd/system/openvpn-server@.service",
                   "/usr/lib/systemd/system/openvpn-server@.service"]
     if not any(os.path.exists(path) for path in unit_paths):
         raise OvpnError(
-            "в системе нет юнита openvpn-server@.service — пакет openvpn слишком старый "
-            "или собран иначе; обновите дистрибутив или пакет openvpn.")
+            "no openvpn-server@.service unit on this system — the openvpn package is too old "
+            "or built differently; upgrade the distribution or the openvpn package.")
 
     if not os.path.exists("/dev/net/tun"):
         run(["modprobe", "tun"], check=False)
     if not os.path.exists("/dev/net/tun"):
-        raise OvpnError("нет /dev/net/tun — включите TUN/TAP у хостера (OpenVZ/LXC).")
+        raise OvpnError("/dev/net/tun is missing — enable TUN/TAP with your hosting provider (OpenVZ/LXC).")
 
     return {
         "openvpn": ".".join(map(str, ovpn)),
@@ -211,7 +211,7 @@ def default_nic() -> str:
     match = re.search(r"\bdev\s+(\S+)", proc.stdout or "")
     if match:
         return match.group(1)
-    raise OvpnError("не удалось определить сетевой интерфейс по умолчанию (задайте --nic).")
+    raise OvpnError("cannot detect the default network interface (use --nic).")
 
 
 def nic_exists(name: str) -> bool:
@@ -289,7 +289,7 @@ def pick_subnet():
         net = ipaddress.IPv4Network(candidate)
         if not any(net.overlaps(existing) for existing in busy):
             return net
-    warn("Все типовые VPN-подсети заняты — беру %s, проверьте конфликты."
+    warn("All standard VPN subnets are in use — using %s, check for conflicts."
          % SUBNET_CANDIDATES[0])
     return ipaddress.IPv4Network(SUBNET_CANDIDATES[0])
 

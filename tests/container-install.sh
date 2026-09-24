@@ -49,9 +49,9 @@ cd /root
 OVPN_REPO_URL=http://127.0.0.1:8000/repo OVPN_REPO_BRANCH=master \
   bash <(cat /src/install.sh) > /var/log/install.log 2>&1 </dev/null \
   && ok "установка одной командой прошла" || { bad "установка"; tail -25 /var/log/install.log; }
-grep -E 'Скачиваю исходники|Исходники распакованы' /var/log/install.log | sed 's/^/    /'
+grep -E 'Downloading sources|Sources extracted' /var/log/install.log | sed 's/^/    /'
 
-chk "исходники скачаны, а не взяты локально" "grep -q 'Скачиваю исходники' /var/log/install.log"
+chk "исходники скачаны, а не взяты локально" "grep -q 'Downloading sources' /var/log/install.log"
 chk "менеджер установлен"        "command -v ovpnctl"
 chk "PKI создан"                 "test -f /etc/ovpnctl/pki/ca.crt"
 chk "конфиг сервера на месте"    "test -f /etc/openvpn/server/server.conf"
@@ -75,36 +75,36 @@ CA_BEFORE=$(openssl x509 -in /etc/ovpnctl/pki/ca.crt -noout -fingerprint)
 OVPN_REPO_URL=http://127.0.0.1:8000/repo OVPN_REPO_BRANCH=master \
   bash <(cat /src/install.sh) > /var/log/install2.log 2>&1 </dev/null \
   && ok "повторный запуск отработал" || { bad "повторный запуск"; tail -15 /var/log/install2.log; }
-chk "сообщение про повторный запуск" "grep -q 'сервер не пересоздавался' /var/log/install2.log"
-chk "видно, что код той же сборки"   "grep -q 'Код уже актуален' /var/log/install2.log"
+chk "сообщение про повторный запуск" "grep -q 'server was not recreated' /var/log/install2.log"
+chk "видно, что код той же сборки"   "grep -q 'Code is already up to date' /var/log/install2.log"
 
 # реальное обновление кода: портим установленный файл и ставим заново
-sed -i 's/ovpnctl — управление OpenVPN/ЗАМЕНЁННЫЙ ЗАГОЛОВОК/' /opt/ovpnctl/lib/ovpnctl/cli.py
+sed -i 's/OpenVPN Management Script/ЗАМЕНЁННЫЙ ЗАГОЛОВОК/' /opt/ovpnctl/lib/ovpnctl/cli.py
 OVPN_REPO_URL=http://127.0.0.1:8000/repo OVPN_REPO_BRANCH=master \
   bash <(cat /src/install.sh) > /var/log/install-upd.log 2>&1 </dev/null
 chk "изменённый файл заменён свежим" \
     "! grep -q 'ЗАМЕНЁННЫЙ ЗАГОЛОВОК' /opt/ovpnctl/lib/ovpnctl/cli.py"
-chk "в выводе видно обновление сборки" "grep -q 'Код обновлён: сборка' /var/log/install-upd.log"
+chk "в выводе видно обновление сборки" "grep -q 'Code updated: build' /var/log/install-upd.log"
 chk "ovpnctl работает после обновления" "ovpnctl --version"
 [ "$CA_BEFORE" = "$(openssl x509 -in /etc/ovpnctl/pki/ca.crt -noout -fingerprint)" ] \
   && ok "PKI не тронут" || bad "PKI перезаписан"
 chk "профиль клиента на месте" "test -s /etc/ovpnctl/profiles/first.ovpn"
-chk "повторный запуск применил конфиг без ошибок" "! grep -q 'Не удалось применить' /var/log/install-upd.log"
+chk "повторный запуск применил конфиг без ошибок" "! grep -q 'Failed to apply' /var/log/install-upd.log"
 
 echo; echo "=== ovpnctl update (без переустановки) ==="
 chk "install.sh запомнил источник" "grep -q 'repo=http://127.0.0.1:8000/repo' /opt/ovpnctl/SOURCE"
 ovpnctl update > /var/log/update1.log 2>&1 && ok "ovpnctl update отработал" \
     || { bad "ovpnctl update"; tail -15 /var/log/update1.log; }
-chk "та же сборка — обновлять нечего" "grep -q 'Обновлять нечего' /var/log/update1.log"
-sed -i 's/ovpnctl — управление OpenVPN/ЗАМЕНЁННЫЙ ЗАГОЛОВОК/' /opt/ovpnctl/lib/ovpnctl/cli.py
+chk "та же сборка — обновлять нечего" "grep -q 'Nothing to update' /var/log/update1.log"
+sed -i 's/OpenVPN Management Script/ЗАМЕНЁННЫЙ ЗАГОЛОВОК/' /opt/ovpnctl/lib/ovpnctl/cli.py
 ovpnctl update --check > /var/log/update2.log 2>&1
-chk "--check видит новую сборку" "grep -q 'Есть обновление' /var/log/update2.log"
+chk "--check видит новую сборку" "grep -q 'An update is available' /var/log/update2.log"
 chk "--check ничего не меняет" "grep -q 'ЗАМЕНЁННЫЙ ЗАГОЛОВОК' /opt/ovpnctl/lib/ovpnctl/cli.py"
 ovpnctl update > /var/log/update3.log 2>&1 && ok "ovpnctl update поставил сборку" \
     || { bad "ovpnctl update"; tail -15 /var/log/update3.log; }
 sed 's/^/    /' /var/log/update3.log
 chk "изменённый файл заменён из репозитория" "! grep -q 'ЗАМЕНЁННЫЙ ЗАГОЛОВОК' /opt/ovpnctl/lib/ovpnctl/cli.py"
-chk "конфиг не менялся — сервер не перезапускали" "grep -q 'не изменилась' /var/log/update3.log"
+chk "конфиг не менялся — сервер не перезапускали" "grep -q 'unchanged' /var/log/update3.log"
 chk "временных каталогов не осталось" "[ ! -e /opt/ovpnctl/lib.new ] && [ ! -e /opt/ovpnctl/lib.old ]"
 [ "$CA_BEFORE" = "$(openssl x509 -in /etc/ovpnctl/pki/ca.crt -noout -fingerprint)" ] \
   && ok "PKI не тронут обновлением" || bad "PKI перезаписан обновлением"
@@ -123,7 +123,7 @@ ovpnctl uninstall -y >/dev/null 2>&1; make_old
 env $ENVV bash /tmp/install.sh > /var/log/install-over.log 2>&1 </dev/null \
   && ok "установка поверх ручной прошла" || { bad "установка поверх ручной"; tail -15 /var/log/install-over.log; }
 chk "предупреждение про прежнюю конфигурацию" \
-    "grep -q 'Обнаружена прежняя конфигурация OpenVPN' /var/log/install-over.log"
+    "grep -q 'Found an existing OpenVPN configuration' /var/log/install-over.log"
 chk "чужие конфиги перечислены"        "grep -q 'manual.conf' /var/log/install-over.log"
 chk "сделана резервная копия /etc/openvpn" \
     "ls /etc/ovpnctl/backup/openvpn-before-ovpnctl-*.tar.gz"
@@ -136,7 +136,7 @@ if command -v script >/dev/null 2>&1; then
     ovpnctl uninstall -y >/dev/null 2>&1; make_old
     printf 'y\n' | script -qec "env $ENVV bash /tmp/install.sh" /dev/null > /var/log/install-y.log 2>&1
     chk "предложено удалить прежний сервер" \
-        "grep -q 'Удалить прежний сервер' /var/log/install-y.log"
+        "grep -q 'Remove the existing server' /var/log/install-y.log"
     chk "прежние конфиги убраны из /etc/openvpn" \
         "! test -f /etc/openvpn/server/manual.conf -o -f /etc/openvpn/old-style.conf"
     chk "конфиги сохранены в архиве"   "ls -d /etc/ovpnctl/backup/previous-openvpn-*"
@@ -149,7 +149,7 @@ if command -v script >/dev/null 2>&1; then
     # --- ответ N, затем смена порта у нового сервера ---
     ovpnctl uninstall -y >/dev/null 2>&1; make_old
     printf 'n\nn\n1195\n' | script -qec "env $ENVV bash /tmp/install.sh" /dev/null > /var/log/install-n.log 2>&1
-    chk "предложена смена порта"       "grep -q 'Порт для нового сервера' /var/log/install-n.log"
+    chk "предложена смена порта"       "grep -q 'Port for the new server' /var/log/install-n.log"
     chk "новый сервер встал на 1195"   "grep -q '\"port\": 1195' /etc/ovpnctl/config.json"
     chk "прежние конфиги остались на месте" "test -f /etc/openvpn/server/manual.conf"
     rm -f /etc/openvpn/server/manual.conf /etc/openvpn/old-style.conf
@@ -173,7 +173,7 @@ OVPN_REPO_URL=http://127.0.0.1:8000/repo OVPN_REPO_BRANCH=master \
 [ "$CA_OLD" != "$(openssl x509 -in /etc/ovpnctl/pki/ca.crt -noout -fingerprint)" ] \
   && ok "создан новый CA (чистая установка)" || bad "CA остался прежним"
 chk "свой прежний конфиг не считается чужим" \
-    "! grep -q 'Обнаружена прежняя конфигурация' /var/log/install3.log"
+    "! grep -q 'Found an existing OpenVPN configuration' /var/log/install3.log"
 
 echo; echo "============================================================"
 echo "ИТОГ: пройдено $PASS, провалено $FAIL"

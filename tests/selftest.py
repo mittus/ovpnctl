@@ -115,7 +115,7 @@ def main():
     check("серийник отозванного в CRL", bob_serial in crl_text)
     check("профиль отозванного удалён", not os.path.exists(clients.profile_path("bob")))
     check("статус в списке — отозван",
-          [r["status"] for r in clients.listing(cfg) if r["name"] == "bob"] == ["отозван"])
+          [r["status"] for r in clients.listing(cfg) if r["name"] == "bob"] == ["revoked"])
 
     print("\n== Ротация CA (главная проверка «VPN не отвалится») ==")
     alice_before = open(pki.cert_path("alice")).read()
@@ -200,24 +200,43 @@ def main():
           str(online))
 
     print("\n== Учёт трафика ==")
-    # сессия, завершённая openvpn: прогоняем настоящий client-disconnect-скрипт
-    env = dict(os.environ, common_name="alice", bytes_received="1000", bytes_sent="5000")
-    run([srv.TRAFFIC_SCRIPT], env=env)
-    env.update(bytes_received="24", bytes_sent="16")
+    import datetime
+    noon = datetime.datetime.combine(datetime.date.today(), datetime.time(12)).timestamp()
+    connected = int(noon - 3 * 86400)
+
+    def online(rx, tx):
+        return [{"name": "alice", "connected_since_t": str(connected),
+                 "bytes_received": rx, "bytes_sent": tx}]
+
+    check("status-файл отдаёт время подключения (ключ сессии)",
+          srv.online_clients()[0].get("connected_since_t") == "1756713600")
+    traffic.collect(online(100, 50), now=noon - 2 * 86400)     # идущая сессия, позавчера
+    traffic.collect(online(300, 150), now=noon - 86400)        # вчера
+    # сессия завершилась сегодня: настоящий client-disconnect-скрипт от openvpn
+    env = dict(os.environ, common_name="alice", bytes_received="1000", bytes_sent="500",
+               time_unix=str(connected), time_duration=str(3 * 86400 - 3600))
     run([srv.TRAFFIC_SCRIPT], env=env)
     with open(srv.TRAFFIC_LOG, "a") as fh:
-        fh.write("битая строка\n")
-    usage = traffic.totals([])
-    check("прошлые сессии сложены", usage.get("alice", {}).get("total") == 6040, str(usage))
+        fh.write("битая строка\nbob,40,2\n")          # старый формат без времени
+    # status-файл ещё не обновился и показывает уже закрытую сессию
+    rows = {r["period"]: r for r in traffic.periods("alice", online(1000, 500), now=noon)}
     check("журнал сессий свёрнут", not os.path.exists(srv.TRAFFIC_LOG))
-    check("повторный сбор не удваивает", traffic.totals([])["alice"]["total"] == 6040)
-    row = [r for r in clients.listing(cfg) if r["name"] == "alice"][0]
-    check("в списке клиентов трафик = прошлые + текущая сессия",
-          row["traffic_total"] == 6040 + 12345 + 6789 and row["traffic_rx"] == 1024 + 12345,
-          str(row))
+    check("сегодня — только остаток сессии после последнего замера",
+          (rows["day"]["rx"], rows["day"]["tx"]) == (700, 350), str(rows["day"]))
+    check("за неделю — вся сессия, без двойного счёта",
+          (rows["week"]["rx"], rows["week"]["tx"]) == (1000, 500), str(rows["week"]))
+    check("всё время = сумма по дням", rows["all"]["total"] == 1500, str(rows["all"]))
+    check("закрытая сессия из устаревшего status-файла не учтена повторно",
+          traffic.summary(online(1000, 500), now=noon + 60)["alice"]["total"] == 1500)
+    check("строка старого формата учтена", traffic.summary([], now=noon)["bob"]["total"] == 42)
+    old = traffic.periods("alice", [], now=noon + 40 * 86400)
+    check("через 40 дней остаётся только в «год» и «всё время»",
+          [r["total"] for r in old] == [0, 0, 0, 1500, 1500], str([r["total"] for r in old]))
     run([srv.TRAFFIC_SCRIPT], env=dict(env, common_name="carol"))
     clients.delete("carol", cfg)
-    check("после удаления клиента его статистика сброшена", "carol" not in traffic.totals([]))
+    check("после удаления клиента его статистика сброшена", "carol" not in traffic.summary([]))
+    check("в списке клиентов трафика больше нет",
+          "traffic_total" not in clients.listing(cfg)[0])
 
     print("\n== Обновление ovpnctl ==")
     repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")

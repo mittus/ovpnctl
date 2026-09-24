@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -9,13 +10,17 @@ import tempfile
 
 IS_TTY = sys.stdout.isatty()
 
+# Палитра в духе 3x-ui: текст и рамки белые, номера и активные значения —
+# тёмно-зелёные, проблемы — красные.
 C_RESET = "\033[0m" if IS_TTY else ""
 C_BOLD = "\033[1m" if IS_TTY else ""
-C_RED = "\033[1;31m" if IS_TTY else ""
-C_GREEN = "\033[1;32m" if IS_TTY else ""
-C_YELLOW = "\033[1;33m" if IS_TTY else ""
-C_CYAN = "\033[1;36m" if IS_TTY else ""
+C_WHITE = "\033[37m" if IS_TTY else ""
+C_GREEN = "\033[32m" if IS_TTY else ""
+C_RED = "\033[31m" if IS_TTY else ""
+C_YELLOW = "\033[33m" if IS_TTY else ""
 C_DIM = "\033[2m" if IS_TTY else ""
+
+_ANSI = re.compile(r"\033\[[0-9;]*m")
 
 
 class OvpnError(Exception):
@@ -23,7 +28,7 @@ class OvpnError(Exception):
 
 
 def info(msg: str) -> None:
-    print("%s%s%s" % (C_CYAN, msg, C_RESET))
+    print("%s%s%s" % (C_WHITE, msg, C_RESET))
 
 
 def ok(msg: str) -> None:
@@ -46,6 +51,23 @@ def dim(msg: str) -> str:
     return "%s%s%s" % (C_DIM, msg, C_RESET)
 
 
+def hl(value) -> str:
+    """Активное значение (имя, число, адрес) — тёмно-зелёным."""
+    return "%s%s%s" % (C_GREEN, value, C_RESET)
+
+
+def red(value) -> str:
+    return "%s%s%s" % (C_RED, value, C_RESET)
+
+
+def visible_len(text: str) -> int:
+    return len(_ANSI.sub("", text))
+
+
+def pad(text: str, width: int) -> str:
+    return text + " " * max(width - visible_len(text), 0)
+
+
 def run(cmd, check=True, capture=True, input_data=None, env=None, cwd=None):
     """Запуск команды. Возвращает CompletedProcess (stdout/stderr — строки)."""
     try:
@@ -60,12 +82,12 @@ def run(cmd, check=True, capture=True, input_data=None, env=None, cwd=None):
         )
     except OSError as exc:
         if check:
-            raise OvpnError("не удалось выполнить '%s': %s" % (" ".join(cmd), exc))
+            raise OvpnError("failed to run '%s': %s" % (" ".join(cmd), exc))
         return subprocess.CompletedProcess(cmd, 127, "", str(exc))
     if check and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         raise OvpnError(
-            "команда завершилась с кодом %d: %s\n%s"
+            "command exited with code %d: %s\n%s"
             % (proc.returncode, " ".join(cmd), detail)
         )
     return proc
@@ -82,7 +104,7 @@ def which(binary: str):
 
 def require_root() -> None:
     if os.geteuid() != 0:
-        raise OvpnError("нужны права root (запустите через sudo).")
+        raise OvpnError("root privileges required (run with sudo).")
 
 
 def write_file(path: str, content: str, mode: int = 0o644, owner=None) -> None:
@@ -123,8 +145,8 @@ def ask(prompt: str, default=None, validator=None):
         except EOFError:
             if default in (None, ""):
                 raise OvpnError(
-                    "нет интерактивного ввода для вопроса «%s» — используйте флаги "
-                    "или --non-interactive." % prompt)
+                    "no interactive input for the question '%s' — use flags "
+                    "or --non-interactive." % prompt)
             raw = ""
         if not raw and default is not None:
             raw = str(default)
@@ -161,7 +183,7 @@ def clear_screen() -> None:
         sys.stdout.flush()
 
 
-def pause(message: str = "Нажмите Enter, чтобы вернуться в меню") -> None:
+def pause(message: str = "Press Enter to return to the menu") -> None:
     try:
         input("\n%s%s%s" % (C_DIM, message, C_RESET))
     except (EOFError, KeyboardInterrupt):
@@ -170,7 +192,7 @@ def pause(message: str = "Нажмите Enter, чтобы вернуться в
 
 def ask_optional(prompt: str, current=None):
     """Необязательный ввод: пустая строка = оставить как есть (вернёт None)."""
-    suffix = " (сейчас %s, Enter — не менять)" % current if current not in (None, "") else " (Enter — пропустить)"
+    suffix = " (now %s, Enter to keep)" % current if current not in (None, "") else " (Enter to skip)"
     try:
         raw = input("%s%s: " % (prompt, suffix)).strip()
     except EOFError:
@@ -179,19 +201,24 @@ def ask_optional(prompt: str, current=None):
 
 
 def human_bytes(num: float) -> str:
-    for unit in ("Б", "КиБ", "МиБ", "ГиБ", "ТиБ"):
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if abs(num) < 1024:
-            return "%.0f %s" % (num, unit) if unit == "Б" else "%.1f %s" % (num, unit)
+            return "%.0f %s" % (num, unit) if unit == "B" else "%.1f %s" % (num, unit)
         num /= 1024.0
-    return "%.1f ПиБ" % num
+    return "%.1f PiB" % num
 
 
 def table(rows, headers) -> str:
-    """Простая текстовая таблица без внешних зависимостей."""
+    """Простая текстовая таблица без внешних зависимостей.
+
+    Ячейки могут быть раскрашены (hl/red) — ширина считается без ANSI-кодов.
+    Заголовки и разделитель белые.
+    """
     all_rows = [list(headers)] + [[str(c) for c in r] for r in rows]
-    widths = [max(len(r[i]) for r in all_rows) for i in range(len(headers))]
+    widths = [max(visible_len(r[i]) for r in all_rows) for i in range(len(headers))]
     line = "  ".join("-" * w for w in widths)
-    out = ["  ".join(h.ljust(widths[i]) for i, h in enumerate(all_rows[0])), line]
+    head = "  ".join(pad(h, widths[i]) for i, h in enumerate(all_rows[0])).rstrip()
+    out = ["%s%s%s" % (C_WHITE + C_BOLD, head, C_RESET), "%s%s%s" % (C_WHITE, line, C_RESET)]
     for row in all_rows[1:]:
-        out.append("  ".join(row[i].ljust(widths[i]) for i in range(len(widths))))
+        out.append("  ".join(pad(row[i], widths[i]) for i in range(len(widths))).rstrip())
     return "\n".join(out)

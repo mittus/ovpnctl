@@ -23,6 +23,7 @@ MGMT_SOCKET = ROOT + "/run/openvpn-server/ovpnctl.sock"
 SERVICE = "openvpn-server@server.service"
 FIREWALL_UNIT = "ovpnctl-firewall.service"
 RENEW_TIMER = "ovpnctl-renew.timer"
+TRAFFIC_TIMER = "ovpnctl-traffic.timer"
 
 CONFIG_VERSION = 1
 
@@ -67,13 +68,13 @@ def config_exists() -> bool:
 def load(required: bool = True) -> dict:
     if not config_exists():
         if required:
-            raise OvpnError("сервер ещё не настроен — выполните: ovpnctl setup")
+            raise OvpnError("server is not set up yet — run: ovpnctl setup")
         return dict(DEFAULTS)
     with open(CONFIG_PATH) as fh:
         try:
             data = json.load(fh)
         except ValueError as exc:
-            raise OvpnError("повреждён %s: %s" % (CONFIG_PATH, exc))
+            raise OvpnError("corrupted %s: %s" % (CONFIG_PATH, exc))
     merged = dict(DEFAULTS)
     merged.update(data)
     return merged

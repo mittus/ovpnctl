@@ -40,7 +40,7 @@ from .util import (
 UNIT_DIR = cfgmod.ROOT + "/etc/systemd/system"
 
 UNIT_FIREWALL = """[Unit]
-Description=ovpnctl: правила файрвола и NAT для OpenVPN
+Description=ovpnctl: firewall and NAT rules for OpenVPN
 After=network-online.target
 Wants=network-online.target
 
@@ -55,7 +55,7 @@ WantedBy=multi-user.target
 """
 
 UNIT_RENEW = """[Unit]
-Description=ovpnctl: проверка и автопродление сертификатов OpenVPN
+Description=ovpnctl: OpenVPN certificate check and auto-renewal
 After=network-online.target
 
 [Service]
@@ -65,7 +65,7 @@ Nice=10
 """
 
 UNIT_RENEW_TIMER = """[Unit]
-Description=ovpnctl: ежедневная проверка сроков сертификатов
+Description=ovpnctl: daily certificate expiry check
 
 [Timer]
 OnBootSec=10min
@@ -78,11 +78,35 @@ Unit=ovpnctl-renew.service
 WantedBy=timers.target
 """
 
+UNIT_TRAFFIC = """[Unit]
+Description=ovpnctl: daily OpenVPN client traffic accounting
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ovpnctl traffic --collect
+Nice=10
+"""
+
+UNIT_TRAFFIC_TIMER = """[Unit]
+Description=ovpnctl: collect client traffic every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=ovpnctl-traffic.service
+
+[Install]
+WantedBy=timers.target
+"""
+
+
 def write_units() -> None:
     write_file(os.path.join(UNIT_DIR, cfgmod.FIREWALL_UNIT),
                UNIT_FIREWALL.format(script=srv.FIREWALL_SCRIPT), 0o644)
     write_file(os.path.join(UNIT_DIR, "ovpnctl-renew.service"), UNIT_RENEW, 0o644)
     write_file(os.path.join(UNIT_DIR, cfgmod.RENEW_TIMER), UNIT_RENEW_TIMER, 0o644)
+    write_file(os.path.join(UNIT_DIR, "ovpnctl-traffic.service"), UNIT_TRAFFIC, 0o644)
+    write_file(os.path.join(UNIT_DIR, cfgmod.TRAFFIC_TIMER), UNIT_TRAFFIC_TIMER, 0o644)
     daemon_reload()
 
 
@@ -99,11 +123,11 @@ def resolve_settings(cfg: dict) -> dict:
     cfg["endpoint"] = public_ip()
     if not cfg["endpoint"]:
         raise OvpnError(
-            "не удалось определить адрес сервера. Проверьте сеть и задайте его "
-            "после установки: ovpnctl set --endpoint <домен или IP>")
+            "could not detect the server address. Check the network and set it "
+            "after installation: ovpnctl set --endpoint <domain or IP>")
     if is_private_ip(cfg["endpoint"]):
-        warn("Определён приватный адрес %s (сервер за NAT). Если клиенты подключаются "
-             "снаружи, задайте внешний адрес: ovpnctl set --endpoint <домен или IP>"
+        warn("Detected private address %s (server behind NAT). If clients connect "
+             "from outside, set the public address: ovpnctl set --endpoint <domain or IP>"
              % cfg["endpoint"])
 
     cfg["nic"] = default_nic()
@@ -113,8 +137,8 @@ def resolve_settings(cfg: dict) -> dict:
     cfg["netmask"] = str(net.netmask)
 
     if port_in_use(cfg["port"], cfg["proto"]):
-        warn("Порт %d/%s уже занят другим процессом — после установки смените его: "
-             "ovpnctl set --port <порт>" % (cfg["port"], cfg["proto"]))
+        warn("Port %d/%s is already in use by another process — change it after installation: "
+             "ovpnctl set --port <port>" % (cfg["port"], cfg["proto"]))
 
     return srv.validate_cfg(cfg)
 
@@ -186,35 +210,35 @@ def handle_preexisting(cfg: dict) -> dict:
     if not (found["configs"] or found["units"]):
         return cfg
 
-    warn("Обнаружена прежняя конфигурация OpenVPN на этом сервере:")
+    warn("Found an existing OpenVPN configuration on this server:")
     for path in found["configs"]:
-        warn("  конфиг: %s" % path)
+        warn("  config: %s" % path)
     for unit in found["units"]:
-        warn("  активная служба: %s" % unit)
+        warn("  active service: %s" % unit)
     archive = backup_openvpn_dir()
-    ok("Резервная копия /etc/openvpn: %s" % archive)
+    ok("Backup of /etc/openvpn: %s" % archive)
 
     if not sys.stdin.isatty():
-        warn("Терминала нет — прежний сервер оставлен как есть. Если он занимает порт, "
-             "остановите его и выполните: ovpnctl set --port <порт>")
+        warn("No terminal — the existing server is left as is. If it occupies the port, "
+             "stop it and run: ovpnctl set --port <port>")
         return cfg
 
-    if ask_yes_no("Удалить прежний сервер (службы отключить, конфиги убрать в архив)?", True):
+    if ask_yes_no("Remove the existing server (disable services, archive configs)?", True):
         purged = purge_previous_openvpn(found)
-        ok("Прежний сервер отключён%s. Установка пойдёт на стандартных параметрах."
-           % (", конфиги перенесены в %s" % purged["dir"] if purged["configs"] else ""))
+        ok("Existing server disabled%s. Installing with default settings."
+           % (", configs moved to %s" % purged["dir"] if purged["configs"] else ""))
         return cfg
 
     if found["units"] and ask_yes_no(
-            "Тогда остановить его сейчас, чтобы освободить порт (автозапуск останется)?", True):
+            "Then stop it now to free the port (autostart stays enabled)?", True):
         for unit in found["units"]:
             systemctl("stop", unit, check=False)
-        ok("Прежние службы остановлены: %s" % ", ".join(found["units"]))
+        ok("Existing services stopped: %s" % ", ".join(found["units"]))
         return cfg
 
-    cfg["port"] = ask("Порт для нового сервера (прежний остаётся работать)", 1195,
+    cfg["port"] = ask("Port for the new server (the existing one keeps running)", 1195,
                       lambda v: int(v) if 1 <= int(v) <= 65535 else (_ for _ in ()).throw(
-                          ValueError("порт должен быть 1–65535")))
+                          ValueError("port must be 1–65535")))
     return cfg
 
 
@@ -222,14 +246,14 @@ def setup(args) -> None:
     require_root()
     dist = check_supported()
     facts = verify_dependencies()
-    ok("Система: %s | OpenVPN %s | OpenSSL %s"
+    ok("System: %s | OpenVPN %s | OpenSSL %s"
        % (dist["pretty"], facts["openvpn"], facts["openssl"]))
 
     if cfgmod.config_exists():
         raise OvpnError(
-            "сервер уже настроен (%s).\n"
-            "  Состояние:            ovpnctl status\n"
-            "  Поставить заново:     ovpnctl uninstall -y  (сохранит архив в /root), затем установка"
+            "server is already set up (%s).\n"
+            "  Status:               ovpnctl status\n"
+            "  Reinstall:            ovpnctl uninstall -y  (saves an archive to /root), then install"
             % cfgmod.CONFIG_PATH)
 
     cfg = cfgmod.load(required=False)
@@ -241,11 +265,11 @@ def setup(args) -> None:
     cfgmod.init_dirs()
     cfgmod.save(cfg)
 
-    ok("Параметры: %s:%d/%s | подсеть %s | интерфейс %s | ключи %s | DNS %s"
+    ok("Settings: %s:%d/%s | subnet %s | interface %s | keys %s | DNS %s"
        % (cfg["endpoint"], cfg["port"], cfg["proto"], cfgmod.network_cidr(cfg),
           cfg["nic"], cfg["key_type"].upper(), ", ".join(cfg["dns"])))
 
-    info("Создаю PKI (CA на %d дней)…" % cfg["ca_days"])
+    info("Creating PKI (CA for %d days)…" % cfg["ca_days"])
     if not os.path.exists(pki.CA_CRT):
         pki.create_ca(cfg)
     else:
@@ -254,39 +278,39 @@ def setup(args) -> None:
         pki.issue(pki.SERVER_NAME, "server_cert", int(cfg["server_days"]), cfg)
     pki.ensure_tc_key()
     pki.gen_crl(cfg)
-    ok("PKI готов: CA до %s, сертификат сервера до %s"
+    ok("PKI ready: CA until %s, server certificate until %s"
        % (pki.not_after(pki.CA_CRT).strftime("%Y-%m-%d"),
           pki.not_after(pki.cert_path(pki.SERVER_NAME)).strftime("%Y-%m-%d")))
 
-    info("Пишу конфигурацию сервера и правила файрвола…")
+    info("Writing server configuration and firewall rules…")
     srv.deploy_pki_to_server(cfg)
     srv.write_server_conf(cfg)
     srv.setup_networking(cfg)
     write_units()
 
-    info("Запускаю службы…")
+    info("Starting services…")
     srv.enable_services()
     if not service_active(cfgmod.SERVICE):
         raise OvpnError(
-            "служба %s не запустилась. Диагностика: journalctl -u %s -n 50 --no-pager"
+            "service %s failed to start. Diagnostics: journalctl -u %s -n 50 --no-pager"
             % (cfgmod.SERVICE, cfgmod.SERVICE))
-    ok("OpenVPN запущен на %s:%d/%s" % (cfg["endpoint"], cfg["port"], cfg["proto"]))
+    ok("OpenVPN running on %s:%d/%s" % (cfg["endpoint"], cfg["port"], cfg["proto"]))
 
     print()
-    print(bold("Установка завершена."))
-    print("  Профили клиентов:   %s" % cfgmod.PROFILE_DIR)
-    print("  Сменить параметры:  ovpnctl set --endpoint vpn.example.com --port 443 --dns 9.9.9.9")
-    print("  Конфиг сервера:     %s" % cfgmod.server_conf_path())
-    print("  Автопродление:      %s (systemd timer, ежедневно)" % cfgmod.RENEW_TIMER)
+    print(bold("Installation complete."))
+    print("  Client profiles:    %s" % cfgmod.PROFILE_DIR)
+    print("  Change settings:    ovpnctl set --endpoint vpn.example.com --port 443 --dns 9.9.9.9")
+    print("  Server config:      %s" % cfgmod.server_conf_path())
+    print("  Auto-renewal:       %s (systemd timer, daily)" % cfgmod.RENEW_TIMER)
     print()
     print()
-    print(bold("Создайте первого клиента:  ovpnctl client add <certname>"))
+    print(bold("Create the first client:  ovpnctl client add <certname>"))
     print()
-    print("  ovpnctl                          — интерактивное меню")
-    print("  ovpnctl client add <certname>    — новый клиент")
-    print("  ovpnctl client show <certname>   — вывести .ovpn в консоль")
-    print("  ovpnctl client list              — список клиентов и сроков")
-    print("  ovpnctl pki check                — сроки всех сертификатов")
+    print("  ovpnctl                          — interactive menu")
+    print("  ovpnctl client add <certname>    — new client")
+    print("  ovpnctl client show <certname>   — print .ovpn to the console")
+    print("  ovpnctl client list              — list clients and expiry dates")
+    print("  ovpnctl pki check                — expiry of all certificates")
 
 
 def backup(dest_dir: str = None) -> str:
@@ -318,8 +342,9 @@ def backup(dest_dir: str = None) -> str:
 # --------------------------------------------------------------------------- #
 def uninstall(keep_pki: bool = False, purge_packages: bool = False) -> None:
     require_root()
-    info("Останавливаю службы…")
-    for unit in (cfgmod.SERVICE, cfgmod.RENEW_TIMER, "ovpnctl-renew.service", cfgmod.FIREWALL_UNIT):
+    info("Stopping services…")
+    for unit in (cfgmod.SERVICE, cfgmod.RENEW_TIMER, "ovpnctl-renew.service",
+                 cfgmod.TRAFFIC_TIMER, "ovpnctl-traffic.service", cfgmod.FIREWALL_UNIT):
         systemctl("disable", "--now", unit, check=False)
 
     if os.path.exists(srv.FIREWALL_SCRIPT):
@@ -329,19 +354,21 @@ def uninstall(keep_pki: bool = False, purge_packages: bool = False) -> None:
     if cfgmod.config_exists():
         cfg = cfgmod.load(required=False)
         if cfg.get("ufw_configured") and srv.ufw_available():
-            info("Убираю правила ufw…")
+            info("Removing ufw rules…")
             for step in srv.setup_ufw(cfg, remove=True):
                 info("  • %s" % step)
 
     archive = None
     if os.path.exists(cfgmod.PKI_DIR):
         archive = backup("/root")
-        ok("Состояние сохранено в %s" % archive)
+        ok("State saved to %s" % archive)
 
     for path in (
         os.path.join(UNIT_DIR, cfgmod.FIREWALL_UNIT),
         os.path.join(UNIT_DIR, "ovpnctl-renew.service"),
         os.path.join(UNIT_DIR, cfgmod.RENEW_TIMER),
+        os.path.join(UNIT_DIR, "ovpnctl-traffic.service"),
+        os.path.join(UNIT_DIR, cfgmod.TRAFFIC_TIMER),
         "/etc/sysctl.d/99-ovpnctl.conf",
         os.path.join(cfgmod.SERVER_DIR, "server.conf"),
         os.path.join(cfgmod.SERVER_DIR, "ca.crt"),
@@ -367,6 +394,6 @@ def uninstall(keep_pki: bool = False, purge_packages: bool = False) -> None:
         env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
         run(["apt-get", "remove", "-y", "-qq", "openvpn"], check=False, env=env)
 
-    ok("ovpnctl удалён." + (" PKI сохранён в %s." % cfgmod.PKI_DIR if keep_pki else ""))
+    ok("ovpnctl removed." + (" PKI kept in %s." % cfgmod.PKI_DIR if keep_pki else ""))
     if archive:
-        print("Резервная копия: %s" % archive)
+        print("Backup: %s" % archive)

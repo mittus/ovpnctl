@@ -35,7 +35,7 @@ ovpnctl doctor                             # самодиагностика: с�
 
 ovpnctl client add <name>                  # новый клиент + профиль .ovpn
 ovpnctl client add <name> --days 365 --ip 10.8.0.50
-ovpnctl client list                        # таблица клиентов: сроки, адрес, общий трафик
+ovpnctl client list                        # таблица клиентов и сроков
 ovpnctl client show <name>                 # вывести .ovpn в консоль
 ovpnctl client renew <name>                # продлить сертификат
 ovpnctl client revoke <name>               # отозвать (CRL + разрыв сессии)
@@ -43,6 +43,8 @@ ovpnctl client delete <name>               # отозвать и удалить 
 ovpnctl client ip <name> 10.8.0.50         # закрепить адрес в VPN-подсети
 
 ovpnctl online                             # активные подключения
+ovpnctl traffic                            # трафик всех клиентов за всё время
+ovpnctl traffic <name>                     # трафик клиента: сегодня / неделя / месяц / год / всё время
 ovpnctl server restart|stop|start|config|logs|rebuild
 ovpnctl set --endpoint vpn.example.com --port 443 --proto tcp --dns 9.9.9.9
 ovpnctl ufw [--install] [--ssh] [--remove] # разрешить порт VPN в ufw
@@ -57,7 +59,7 @@ ovpnctl uninstall [--keep-pki] [--purge]
 ## Обновление
 
 ```bash
-ovpnctl update           # или пункт 17 в меню
+ovpnctl update           # или пункт 18 в меню
 ovpnctl update --check   # только узнать, есть ли новая сборка
 ```
 
@@ -75,7 +77,7 @@ ovpnctl update --check   # только узнать, есть ли новая �
 ## Файрвол
 
 ```bash
-ovpnctl ufw              # или пункт 16 в меню
+ovpnctl ufw              # или пункт 17 в меню
 ovpnctl ufw --install    # заодно поставить сам пакет ufw
 ovpnctl ufw --ssh        # заодно разрешить порты sshd (из /etc/ssh/sshd_config)
 ovpnctl ufw --remove     # убрать разрешение
@@ -144,14 +146,15 @@ cat /var/log/ovpnctl/renew.log
 /etc/ovpnctl/profiles/        мастер-копии .ovpn (режим 0600, только root)
 ~/ovpnctl/                    выгруженные профили того, кто выполнял команду (владелец — он же)
 /etc/ovpnctl/firewall.sh      правила NAT/forward (применяет ovpnctl-firewall.service)
-/etc/ovpnctl/traffic.json     накопленный трафик клиентов по завершённым сессиям
+/etc/ovpnctl/traffic.json     трафик клиентов по дням и за всё время
 /etc/ovpnctl/server.extra.conf   (опционально) свои директивы, добавляются в конец server.conf
 /etc/openvpn/server/          рабочая копия конфига и материалов PKI для демона
 /var/log/ovpnctl/renew.log    журнал автопродления
 ```
 
 Юниты systemd: `openvpn-server@server.service` (штатный, с drop-in от ovpnctl),
-`ovpnctl-firewall.service`, `ovpnctl-renew.timer` + `ovpnctl-renew.service`.
+`ovpnctl-firewall.service`, `ovpnctl-renew.timer` + `ovpnctl-renew.service`,
+`ovpnctl-traffic.timer` + `ovpnctl-traffic.service`.
 
 ---
 
@@ -172,11 +175,14 @@ cat /var/log/ovpnctl/renew.log
   status-файл и management-сокет.
 * **Отзыв мгновенный.** `client revoke` обновляет CRL и через management-сокет рвёт
   текущую сессию клиента.
-* **Общий трафик клиента.** При отключении клиента openvpn вызывает
+* **Трафик клиентов по периодам.** При отключении клиента openvpn вызывает
   `/etc/openvpn/server/ovpnctl-traffic.sh` (`client-disconnect`), и тот дописывает байты
-  сессии в `/etc/openvpn/server/traffic/sessions.log`. `ovpnctl` сворачивает журнал в
-  `/etc/ovpnctl/traffic.json` и прибавляет текущую сессию из status-файла. Счётчик
-  копится за всё время и сбрасывается только при `client delete`.
+  сессии в `/etc/openvpn/server/traffic/sessions.log`. Каждые 5 минут
+  `ovpnctl-traffic.timer` раскладывает по дням прирост идущих сессий (из status-файла) и
+  остатки завершённых, в `/etc/ovpnctl/traffic.json`. Поэтому даже многодневная сессия
+  попадает в правильные дни. Дневная статистика хранится 400 дней, итог за всё время —
+  бессрочно; сбрасывается только при `client delete`. Принято/отправлено — со стороны
+  сервера.
 
 ## Проверка кода
 
