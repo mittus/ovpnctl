@@ -265,6 +265,22 @@ def main():
     later = {r["period"]: r for r in traffic.periods("dave", [], now=noon + 14 * 3600)}
     check("через 14 часов часовые окна пусты, дни сохранились",
           later["12h"]["total"] == 0 and later["all"]["total"] == 990, str(later["12h"]))
+    # сброс: у идущей сессии база сохраняется — после сброса считается только новый прирост
+    reset_now = noon + 15 * 3600
+    traffic.collect([dict(first[0], bytes_received=660, bytes_sent=330)], now=reset_now)
+    alice_before = traffic.summary([], now=reset_now)["alice"]["total"]
+    check("сброс клиента", traffic.reset("dave", [], now=reset_now) == ["dave"]
+          and traffic.summary([], now=reset_now)["dave"]["total"] == 0)
+    check("сброс одного клиента не трогает других",
+          traffic.summary([], now=reset_now)["alice"]["total"] == alice_before > 0)
+    after = {r["period"]: r for r in traffic.periods(
+        "dave", [dict(first[0], bytes_received=700, bytes_sent=350)], now=reset_now + 600)}
+    check("после сброса идущая сессия не насчитывается заново",
+          after["all"]["total"] == 60 and after["1h"]["total"] == 60, str(after["all"]))
+    cleared = traffic.reset(None, [], now=reset_now + 700)
+    check("общий сброс обнуляет всех",
+          set(cleared) >= {"alice", "bob", "dave"}
+          and all(v["total"] == 0 for v in traffic.summary([], now=reset_now + 700).values()))
     run([srv.TRAFFIC_SCRIPT], env=dict(env, common_name="carol"))
     clients.delete("carol", cfg)
     check("после удаления клиента его статистика сброшена", "carol" not in traffic.summary([]))

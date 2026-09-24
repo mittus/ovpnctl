@@ -268,6 +268,8 @@ def cmd_traffic(args) -> int:
     if args.collect:
         traffic.collect()               # вызывается таймером
         return 0
+    if args.reset:
+        return _traffic_reset(args.name, args.yes)
 
     if args.name:
         known = {r["name"] for r in clients.listing(cfgmod.load())}
@@ -292,6 +294,26 @@ def cmd_traffic(args) -> int:
     print(bold("Client traffic, all time"))
     print(_traffic_table(rows))
     print(dim("  Received/sent — from the server's side. Per period: ovpnctl traffic <certname>"))
+    return 0
+
+
+def _traffic_reset(name, yes: bool) -> int:
+    """Сброс статистики трафика клиента или всех клиентов (с подтверждением)."""
+    if name:
+        known = {r["name"] for r in clients.listing(cfgmod.load())}
+        if name not in known and name not in traffic.summary():
+            raise OvpnError("client '%s' not found." % name)
+        question = "Reset traffic statistics of client '%s'?" % name
+    else:
+        question = "Reset traffic statistics of ALL clients?"
+    if not yes and not ask_yes_no(question + " This cannot be undone.", False):
+        info("Nothing was reset.")
+        return 1
+    done = traffic.reset(name)
+    if name:
+        ok("Traffic statistics of client '%s' reset." % name)
+    else:
+        ok("Traffic statistics reset for %d client(s)." % len(done))
     return 0
 
 
@@ -782,25 +804,65 @@ def _menu_client_list(cfg: dict) -> None:
     cmd_client_show(_Args(name=name, path=False))
 
 
+REFRESH_WORDS = ("r", "к")                 # «к» — та же клавиша в русской раскладке
+RESET_WORDS = ("c", "с")                   # кириллическая «с» — та же клавиша
+
+
+def _nav_input(prompt: str) -> str:
+    """Ввод в экранах с обновлением: EOF и Ctrl+D считаем «назад»."""
+    try:
+        return input("%s: " % prompt).strip()
+    except EOFError:
+        return "0"
+
+
 def _menu_traffic(cfg: dict) -> None:
-    """Общий трафик всех клиентов, затем — по периодам для выбранного."""
-    rows = _traffic_rows(cfg)
-    if not rows:
-        info("No clients yet. Create the first one with option 1.")
-        return
-    print(bold("Client traffic, all time"))
-    print(_traffic_table(rows, numbered=True))
-    print(dim("  Received/sent — from the server's side."))
-    print()
-    raw = _ask_or_back("Traffic by period — client number or name")
-    names = [r["name"] for r in rows]
-    if raw.isdigit() and 1 <= int(raw) <= len(names):
-        raw = names[int(raw) - 1]
-    if raw not in names:
-        warn("Client '%s' not found." % raw)
-        return
-    print()
-    cmd_traffic(_Args(name=raw, json=False, collect=False))
+    """Общий трафик всех клиентов → по периодам для выбранного.
+
+    На обоих экранах r обновляет данные; Enter/0 на экране клиента возвращает
+    к общему списку, а из списка — в главное меню.
+    """
+    while True:
+        rows = _traffic_rows(cfg)
+        if not rows:
+            info("No clients yet. Create the first one with option 1.")
+            return
+        clear_screen()
+        print(bold("Client traffic, all time"))
+        print(_traffic_table(rows, numbered=True))
+        print(dim("  Received/sent — from the server's side."))
+        print()
+        raw = _nav_input("Client number or name for traffic by period "
+                         "(r — refresh, c — reset all, Enter or 0 — main menu)")
+        if raw.lower() in REFRESH_WORDS:
+            continue
+        if raw.lower() in RESET_WORDS:
+            _traffic_reset(None, False)
+            pause("Press Enter to return to the client list")
+            continue
+        if raw.lower() in CANCEL_WORDS:
+            raise BackToMenu()
+        names = [r["name"] for r in rows]
+        if raw.isdigit() and 1 <= int(raw) <= len(names):
+            raw = names[int(raw) - 1]
+        if raw not in names:
+            warn("Client '%s' not found." % raw)
+            pause("Press Enter to return to the client list")
+            continue
+        _menu_traffic_client(raw)
+
+
+def _menu_traffic_client(name: str) -> None:
+    while True:
+        clear_screen()
+        cmd_traffic(_Args(name=name, json=False, collect=False, reset=False, yes=False))
+        print()
+        raw = _nav_input("r — refresh, c — reset this client, Enter or 0 — back to the client list")
+        if raw.lower() in RESET_WORDS:
+            _traffic_reset(name, False)
+            pause("Press Enter to continue")
+        elif raw.lower() not in REFRESH_WORDS:
+            return
 
 
 def _menu_client_action(cfg: dict, action) -> None:
@@ -951,6 +1013,10 @@ def build_parser() -> argparse.ArgumentParser:
     traffic_parser.add_argument("name", metavar="certname", nargs="?",
                                 help="client — show today/week/month/year/all time")
     traffic_parser.add_argument("--json", action="store_true")
+    traffic_parser.add_argument("--reset", action="store_true",
+                                help="reset statistics of the client (or of all clients)")
+    traffic_parser.add_argument("-y", "--yes", action="store_true",
+                                help="do not ask for confirmation (with --reset)")
     traffic_parser.add_argument("--collect", action="store_true", help=argparse.SUPPRESS)
     traffic_parser.set_defaults(func=cmd_traffic)
 

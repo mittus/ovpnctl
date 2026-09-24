@@ -177,6 +177,13 @@ if command -v script >/dev/null 2>&1; then
     printf '4\nphone\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu7.log 2>&1; strip_ansi /var/log/menu7.log
     chk "пункт «Трафик»: общий список"     "grep -q 'Client traffic, all time' /var/log/menu7.log"
     chk "пункт «Трафик»: периоды по клиенту" "grep -q 'Week (7 days)' /var/log/menu7.log"
+    # r обновляет оба экрана; Enter с экрана клиента — к списку, 0 из списка — в главное меню
+    printf '4\nr\nphone\nr\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu8.log 2>&1; strip_ansi /var/log/menu8.log
+    chk "трафик: r обновляет список, Enter у клиента возвращает к списку" \
+        "[ \"$(grep -c 'Client traffic, all time' /var/log/menu8.log)\" -eq 3 ]"
+    chk "трафик: r обновляет экран клиента" "[ \"$(grep -c 'Traffic of client phone' /var/log/menu8.log)\" -eq 2 ]"
+    chk "трафик: 0 из списка — сразу в главное меню" \
+        "[ \"$(grep -c 'enter your selection' /var/log/menu8.log)\" -eq 2 ] && ! grep -q 'Press Enter' /var/log/menu8.log"
 
     printf '6\nphone\nn\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu2.log 2>&1; strip_ansi /var/log/menu2.log
     chk "подтверждение предлагает Y/n"  "grep -q '\[Y/n\]\|\[y/N\]' /var/log/menu2.log"
@@ -257,6 +264,22 @@ else
     bad "обновлённый профиль не подключается"; tail -15 /var/log/ovpn-new-profile.log
 fi
 pkill -f "openvpn --config /etc/ovpnctl/profiles/tester.ovpn"
+
+echo; echo "=== 8б. сброс статистики трафика ==="
+if command -v script >/dev/null 2>&1; then
+    # экран клиента: c → подтверждение y → Enter → Enter (к списку) → 0 (в главное меню)
+    printf '4\ntester\nc\ny\n\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu9.log 2>&1; strip_ansi /var/log/menu9.log
+    chk "меню: сброс клиента с подтверждением" \
+        "grep -q \"Reset traffic statistics of client 'tester'\" /var/log/menu9.log && grep -q \"statistics of client 'tester' reset\" /var/log/menu9.log"
+    printf '4\nc\nn\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu10.log 2>&1; strip_ansi /var/log/menu10.log
+    chk "меню: общий сброс спрашивает, ответ n ничего не сбрасывает" \
+        "grep -q 'Reset traffic statistics of ALL clients' /var/log/menu10.log && grep -q 'Nothing was reset' /var/log/menu10.log"
+fi
+chk "без -y команда не сбрасывает молча" "! ovpnctl traffic --reset </dev/null"
+chk "ovpnctl traffic --reset -y сбрасывает всех" "ovpnctl traffic --reset -y | grep -q 'reset for'"
+chk "после общего сброса всё по нулям" \
+    "ovpnctl traffic --json | python3 -c 'import json,sys; sys.exit(0 if all(r[\"total\"] == 0 for r in json.load(sys.stdin)) else 1)'"
+chk "сброс неизвестного клиента — ошибка" "! ovpnctl traffic nosuch --reset -y"
 
 echo; echo "=== 9. selftest в контейнере ==="
 python3 /src/tests/selftest.py 2>&1 | tail -3

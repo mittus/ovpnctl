@@ -244,6 +244,24 @@ def periods(name: str, online=None, now: float = None) -> list:
     return rows
 
 
+def reset(name: str = None, online=None, now: float = None) -> list:
+    """Обнуляет статистику клиента (или всех, если name не задан).
+
+    Сначала досчитываем всё, что накопилось, и только потом обнуляем. Базу
+    идущих сессий (live) не трогаем: иначе следующий замер посчитал бы
+    весь трафик сессии заново, с момента подключения.
+    """
+    data = collect(online, now)
+    names = [name] if name else list(data)
+    for key in names:
+        entry = data.get(key)
+        if entry is None:
+            continue
+        entry.update(rx=0, tx=0, days={}, slots={})
+    _save(data)
+    return [key for key in names if key in data]
+
+
 def forget(name: str) -> None:
     """Сбрасывает статистику клиента (при полном удалении имя может занять новый)."""
     data = collect()
