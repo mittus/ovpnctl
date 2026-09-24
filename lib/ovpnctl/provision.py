@@ -79,7 +79,7 @@ WantedBy=timers.target
 """
 
 UNIT_TRAFFIC = """[Unit]
-Description=ovpnctl: daily OpenVPN client traffic accounting
+Description=ovpnctl: OpenVPN client traffic accounting by day
 
 [Service]
 Type=oneshot

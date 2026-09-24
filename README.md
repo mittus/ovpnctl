@@ -43,8 +43,8 @@ ovpnctl client delete <name>               # отозвать и удалить 
 ovpnctl client ip <name> 10.8.0.50         # закрепить адрес в VPN-подсети
 
 ovpnctl online                             # активные подключения
-ovpnctl traffic                            # трафик всех клиентов за всё время
-ovpnctl traffic <name>                     # трафик клиента: сегодня / неделя / месяц / год / всё время
+ovpnctl traffic                            # трафик клиентов
+ovpnctl traffic <name>                     # трафик клиента подробно
 ovpnctl server restart|stop|start|config|logs|rebuild
 ovpnctl set --endpoint vpn.example.com --port 443 --proto tcp --dns 9.9.9.9
 ovpnctl ufw [--install] [--ssh] [--remove] # разрешить порт VPN в ufw
@@ -179,9 +179,12 @@ cat /var/log/ovpnctl/renew.log
   `/etc/openvpn/server/ovpnctl-traffic.sh` (`client-disconnect`), и тот дописывает байты
   сессии в `/etc/openvpn/server/traffic/sessions.log`. Каждые 5 минут
   `ovpnctl-traffic.timer` раскладывает по дням прирост идущих сессий (из status-файла) и
-  остатки завершённых, в `/etc/ovpnctl/traffic.json`. Поэтому даже многодневная сессия
-  попадает в правильные дни. Дневная статистика хранится 400 дней, итог за всё время —
-  бессрочно; сбрасывается только при `client delete`. Принято/отправлено — со стороны
+  остатки завершённых, в `/etc/ovpnctl/traffic.json`. Прирост делится между днями
+  пропорционально времени — от прошлого замера или от момента подключения, поэтому
+  многодневная сессия попадает в правильные дни, даже если её впервые увидели позже.
+  Для окон «последний час / 7 / 12 часов» дополнительно ведутся 5-минутные корзины за
+  последние 13 часов (погрешность окна — до 5 минут). Дневная статистика хранится
+  400 дней, итог за всё время — бессрочно; сбрасывается только при `client delete`. Принято/отправлено — со стороны
   сервера.
 
 ## Проверка кода

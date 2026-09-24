@@ -221,8 +221,16 @@ def main():
     # status-файл ещё не обновился и показывает уже закрытую сессию
     rows = {r["period"]: r for r in traffic.periods("alice", online(1000, 500), now=noon)}
     check("журнал сессий свёрнут", not os.path.exists(srv.TRAFFIC_LOG))
-    check("сегодня — только остаток сессии после последнего замера",
-          (rows["day"]["rx"], rows["day"]["tx"]) == (700, 350), str(rows["day"]))
+    # остаток 700/350 с прошлого замера (вчера в полдень) до отключения (сегодня 11:00)
+    # делится по времени: 12 ч вчера и 11 ч сегодня
+    check("сегодня — только сегодняшняя доля остатка сессии",
+          (rows["day"]["rx"], rows["day"]["tx"]) == (700 - round(700 * 12 / 23), 350 - round(350 * 12 / 23)),
+          str(rows["day"]))
+    days = traffic.collect([], now=noon)["alice"]["days"]
+    day_of = lambda shift: (datetime.date.today() - datetime.timedelta(days=shift)).isoformat()
+    check("замеры идущей сессии разложены по дням пропорционально времени",
+          [days.get(day_of(n)) for n in (3, 2, 1)]
+          == [[50, 25], [150, 75], [100 + round(700 * 12 / 23), 50 + round(350 * 12 / 23)]], str(days))
     check("за неделю — вся сессия, без двойного счёта",
           (rows["week"]["rx"], rows["week"]["tx"]) == (1000, 500), str(rows["week"]))
     check("всё время = сумма по дням", rows["all"]["total"] == 1500, str(rows["all"]))
@@ -231,7 +239,32 @@ def main():
     check("строка старого формата учтена", traffic.summary([], now=noon)["bob"]["total"] == 42)
     old = traffic.periods("alice", [], now=noon + 40 * 86400)
     check("через 40 дней остаётся только в «год» и «всё время»",
-          [r["total"] for r in old] == [0, 0, 0, 1500, 1500], str([r["total"] for r in old]))
+          [r["total"] for r in old] == [0, 0, 0, 0, 0, 0, 1500, 1500], str([r["total"] for r in old]))
+    check("периоды: часы, затем дни", [r["period"] for r in old]
+          == ["1h", "7h", "12h", "day", "week", "month", "year", "all"])
+    # многодневную сессию впервые увидели только сейчас (таймера не было, обновились)
+    first = [{"name": "dave", "connected_since_t": str(connected),
+              "bytes_received": 600, "bytes_sent": 300}]
+    rows = {r["period"]: r for r in traffic.periods("dave", first, now=noon)}
+    check("первый замер не валит всю сессию в «сегодня»",
+          rows["day"]["total"] == 150 and rows["week"]["total"] == 900,
+          "%s / %s" % (rows["day"], rows["week"]))
+    check("первый замер разложен с момента подключения",
+          [traffic.collect([], now=noon)["dave"]["days"].get(day_of(n)) for n in (3, 2, 1, 0)]
+          == [[100, 50], [200, 100], [200, 100], [100, 50]])
+    rows = {r["period"]: r for r in traffic.periods("dave", [dict(first[0], bytes_received=660,
+                                                                  bytes_sent=330)],
+                                                    now=noon + 3600)}
+    check("следующий замер добавляет только прирост за час",
+          rows["day"]["total"] == 150 + 90 and rows["all"]["total"] == 990, str(rows["day"]))
+    check("последний час — только прирост за этот час", rows["1h"]["total"] == 90, str(rows["1h"]))
+    # 7 ч назад = 6 ч первой многодневной сессии (900 байт за 72 ч → 75) + 90 за последний час
+    check("последние 7 часов — по доле времени", rows["7h"]["total"] == 75 + 90, str(rows["7h"]))
+    check("последние 12 часов больше 7 и меньше «сегодня» (с полуночи прошло 13 ч)",
+          rows["7h"]["total"] < rows["12h"]["total"] < rows["day"]["total"], str(rows["12h"]))
+    later = {r["period"]: r for r in traffic.periods("dave", [], now=noon + 14 * 3600)}
+    check("через 14 часов часовые окна пусты, дни сохранились",
+          later["12h"]["total"] == 0 and later["all"]["total"] == 990, str(later["12h"]))
     run([srv.TRAFFIC_SCRIPT], env=dict(env, common_name="carol"))
     clients.delete("carol", cfg)
     check("после удаления клиента его статистика сброшена", "carol" not in traffic.summary([]))

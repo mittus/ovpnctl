@@ -124,7 +124,7 @@ chk "в списке клиентов колонки трафика нет" "! o
 chk "ovpnctl traffic: у подключённого клиента трафик текущей сессии" \
     "ovpnctl traffic | grep phone | grep -qE '[0-9.]+ (KiB|MiB)'"
 chk "ovpnctl traffic phone: разбивка по периодам" \
-    "ovpnctl traffic phone | grep -q 'Today' && ovpnctl traffic phone | grep -q 'All time'"
+    "ovpnctl traffic phone | grep -q 'Last hour' && ovpnctl traffic phone | grep -q 'Last 12 hours' && ovpnctl traffic phone | grep -q 'All time'"
 chk "таймер сбора трафика создан" "test -f /etc/systemd/system/ovpnctl-traffic.timer"
 echo "  --- ovpnctl traffic ---"; ovpnctl traffic
 echo "  --- ovpnctl traffic phone ---"; ovpnctl traffic phone
@@ -191,8 +191,8 @@ chk "серийник в CRL" "openssl crl -in /etc/openvpn/server/crl.pem -noou
 sleep 1
 chk "openvpn (от nobody) записал трафик завершённой сессии" \
     "ovpnctl traffic >/dev/null && grep -q '\"phone\"' /etc/ovpnctl/traffic.json"
-chk "у отозванного клиента ненулевой трафик за сегодня" \
-    "ovpnctl traffic phone --json | python3 -c 'import json,sys; r={p[\"period\"]: p for p in json.load(sys.stdin)}; sys.exit(0 if r[\"day\"][\"total\"] > 0 and r[\"day\"][\"total\"] == r[\"all\"][\"total\"] else 1)'"
+chk "у отозванного клиента трафик за последний час = за сегодня = за всё время" \
+    "ovpnctl traffic phone --json | python3 -c 'import json,sys; r={p[\"period\"]: p for p in json.load(sys.stdin)}; sys.exit(0 if r[\"1h\"][\"total\"] > 0 and r[\"1h\"][\"total\"] == r[\"day\"][\"total\"] and r[\"day\"][\"total\"] == r[\"all\"][\"total\"] else 1)'"
 pkill -f 'openvpn --config /etc/ovpnctl/profiles/phone.ovpn'; sleep 2
 SRV_LOG_MARK=$(wc -l < /var/log/ovpn-server.log)
 : > /var/log/ovpn-client2.log
