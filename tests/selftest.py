@@ -287,6 +287,36 @@ def main():
     check("в списке клиентов трафика больше нет",
           "traffic_total" not in clients.listing(cfg)[0])
 
+    print("\n== Сессия с потерянным именем (UNDEF) ==")
+    # так status-файл выглядит, когда у OpenVPN 2.4 сорвалась смена ключей с iOS-клиентом
+    with open(cfgmod.STATUS_FILE, "w") as fh:
+        fh.write("HEADER,CLIENT_LIST,Common Name,Real Address,Virtual Address,"
+                 "Virtual IPv6 Address,Bytes Received,Bytes Sent,Connected Since,"
+                 "Connected Since (time_t),Username,Client ID,Peer ID\n"
+                 "CLIENT_LIST,UNDEF,188.170.79.142:32818,10.8.0.9,,800,400,"
+                 "Thu Sep 24 23:52:11 2026,%d,UNDEF,5,0\n"
+                 "CLIENT_LIST,UNDEF,198.51.100.7:1000,10.8.0.77,,10,10,"
+                 "Thu Sep 24 23:52:11 2026,1234,UNDEF,6,1\n" % connected)
+    store = traffic._load()
+    store["UNDEF"] = {"rx": 1, "tx": 1, "days": {}, "slots": {}, "live": {}, "closed": {}}
+    traffic._save(store)
+    sessions = srv.online_clients()
+    check("UNDEF опознан по времени подключения сессии",
+          sessions[0]["name"] == "dave" and sessions[0].get("renegotiating"), str(sessions[0]))
+    check("неопознанная сессия остаётся UNDEF", sessions[1]["name"] == "UNDEF")
+    traffic.collect(now=reset_now + 900)
+    store = traffic._load()
+    check("в учёте нет отдельного клиента UNDEF", "UNDEF" not in store, str(list(store)))
+    check("трафик сессии с потерянным именем идёт настоящему клиенту",
+          store["dave"]["rx"] == 800 - 700 and store["dave"]["tx"] == 400 - 350,
+          "%s/%s" % (store["dave"]["rx"], store["dave"]["tx"]))
+    clients.add("pinned", cfg, static_ip="10.8.0.77")
+    check("UNDEF опознан по закреплённому адресу", srv.online_clients()[1]["name"] == "pinned")
+    check("сервер не начинает смену ключей сам (нет гонки с клиентом)",
+          "reneg-sec 0" in srv.build_server_conf(cfg))
+    check("смену ключей раз в час начинает клиент",
+          "reneg-sec 3600" in clients.profile_text("pinned", cfg))
+
     print("\n== Обновление ovpnctl ==")
     repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
     finished = []

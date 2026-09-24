@@ -25,7 +25,7 @@ from . import config as cfgmod
 from . import server as srv
 from .util import write_file
 
-STORE = os.path.join(cfgmod.ETC_DIR, "traffic.json")
+STORE = cfgmod.TRAFFIC_STORE
 KEEP_DAYS = 400             # дневные корзины старше не нужны ни одному периоду
 SLOT = 300                  # мелкие корзины для окон в часах — по 5 минут (шаг таймера)
 KEEP_SLOTS = 13 * 3600      # хватает на самое длинное окно в часах (12 ч)
@@ -159,7 +159,7 @@ def collect(online=None, now: float = None) -> dict:
     # завершённые сессии: имя,rx,tx[,время подключения,длительность]
     for line in lines:
         parts = line.strip().split(",")
-        if len(parts) not in (3, 5) or not parts[0]:
+        if len(parts) not in (3, 5) or not parts[0] or parts[0] == srv.UNDEF:
             continue
         entry = _entry(data, parts[0])
         rx, tx = _number(parts[1]), _number(parts[2])
@@ -181,8 +181,8 @@ def collect(online=None, now: float = None) -> dict:
     active = set()
     for client in online:
         key = client.get("connected_since_t") or ""
-        if not client["name"] or not key:
-            continue
+        if not client["name"] or client["name"] == srv.UNDEF or not key:
+            continue                    # имя не удалось восстановить — остаток придёт из журнала
         entry = _entry(data, client["name"])
         if key in entry["closed"]:
             continue                    # status-файл ещё не обновился после отключения
@@ -194,6 +194,7 @@ def collect(online=None, now: float = None) -> dict:
 
     # уборка: старые дни, давно завершённые и потерянные сессии
     oldest = _day(now - KEEP_DAYS * 86400)
+    data.pop(srv.UNDEF, None)           # след старой версии: сессии с потерянным именем
     for name, entry in data.items():
         _entry(data, name)
         entry["days"] = {d: v for d, v in entry["days"].items() if d >= oldest}

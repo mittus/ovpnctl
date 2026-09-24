@@ -21,6 +21,7 @@ nobind
 persist-key
 persist-tun
 remote-cert-tls server
+reneg-sec 3600
 auth {auth}
 tls-version-min 1.2
 verb 3

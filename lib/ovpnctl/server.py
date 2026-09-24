@@ -82,6 +82,11 @@ def build_server_conf(cfg: dict) -> str:
         "user nobody",
         "group %s" % group,
         "",
+        # Смену ключей начинает только клиент (reneg-sec 3600 в профиле). Если оба
+        # начинают одновременно — ровно через час, — OpenVPN 2.4 и OpenVPN Connect
+        # расходятся в номерах ключей ("key IDs out of sync") и сессия теряет имя.
+        "reneg-sec 0",
+        "",
         "script-security 2",
         "client-disconnect %s" % TRAFFIC_SCRIPT,
         "",
@@ -416,10 +421,56 @@ def kill_client(name: str) -> bool:
     return "SUCCESS" in out
 
 
+UNDEF = "UNDEF"
+
+
+def _session_names() -> dict:
+    """Время подключения сессии → имя клиента, из учёта трафика.
+
+    Нужно, чтобы опознать сессию, у которой OpenVPN потерял имя (UNDEF): время
+    подключения у неё то же, что было при первом замере под настоящим именем.
+    """
+    import json
+
+    try:
+        with open(cfgmod.TRAFFIC_STORE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    names = {}
+    for name, entry in data.items() if isinstance(data, dict) else ():
+        if name == UNDEF or not isinstance(entry, dict):
+            continue
+        for key in list(entry.get("live") or {}) + list(entry.get("closed") or {}):
+            names[key] = name
+    return names
+
+
+def _resolve_undef(clients: list) -> list:
+    lost = [c for c in clients if c["name"] == UNDEF]
+    if not lost:
+        return clients
+    by_session = _session_names()
+    by_address = {}
+    try:
+        for name, meta in pki.db_load().get("clients", {}).items():
+            if meta.get("static_ip") and not meta.get("revoked"):
+                by_address[meta["static_ip"]] = name
+    except (OSError, ValueError, OvpnError):
+        pass
+    for client in lost:
+        client["renegotiating"] = True
+        client["name"] = (by_session.get(client["connected_since_t"])
+                          or by_address.get(client["virtual_address"]) or UNDEF)
+    return clients
+
+
 def online_clients():
     """Подключённые клиенты из status-файла (status-version 2).
 
     Колонки берём из строки HEADER — их состав отличается между версиями OpenVPN.
+    Если OpenVPN показывает вместо имени UNDEF (сорвалась смена ключей), имя
+    восстанавливается, а у клиента ставится флаг renegotiating.
     """
     path = cfgmod.STATUS_FILE
     if not os.path.exists(path):
@@ -462,7 +513,7 @@ def online_clients():
             "connected_since": field(parts, "Connected Since"),
             "connected_since_t": field(parts, "Connected Since (time_t)"),
         })
-    return clients
+    return _resolve_undef(clients)
 
 
 def status_summary(cfg: dict) -> dict:

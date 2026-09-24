@@ -74,6 +74,13 @@ def _or_dash(value) -> str:
     return hl(value) if value else "—"
 
 
+def _session_name(client: dict) -> str:
+    """Имя в списке подключений; сессия с сорванной сменой ключей помечается."""
+    if client.get("renegotiating"):
+        return hl(client["name"]) + red(" (rekey failed)")
+    return hl(client["name"])
+
+
 # --------------------------------------------------------------------------- #
 # Команды: клиенты
 # --------------------------------------------------------------------------- #
@@ -237,7 +244,7 @@ def cmd_status(args) -> int:
         print(bold("Connected now"))
         for client in online:
             print("   • %s %s %s ↓ / %s ↑  since %s"
-                  % (pad(hl(client["name"]), 20), pad(hl(client["virtual_address"]), 16),
+                  % (pad(_session_name(client), 20), pad(hl(client["virtual_address"]), 16),
                      _bytes(client["bytes_received"]), _bytes(client["bytes_sent"]),
                      client["connected_since"]))
     if report["problems"]:
@@ -256,7 +263,7 @@ def cmd_online(args) -> int:
     if not online:
         info("No active connections.")
         return 0
-    rows = [[hl(c["name"]), hl(c["virtual_address"]), c["real_address"],
+    rows = [[_session_name(c), hl(c["virtual_address"]), c["real_address"],
              _bytes(c["bytes_received"]), _bytes(c["bytes_sent"]), c["connected_since"]]
             for c in online]
     print(table(rows, ["NAME", "VPN ADDRESS", "FROM", "RECEIVED", "SENT", "CONNECTED SINCE"]))

@@ -18,6 +18,7 @@ BACKUP_DIR = os.path.join(ETC_DIR, "backup")
 SERVER_DIR = ROOT + "/etc/openvpn/server"
 LOG_DIR = ROOT + "/var/log/ovpnctl"
 RENEW_LOG = os.path.join(LOG_DIR, "renew.log")
+TRAFFIC_STORE = os.path.join(ETC_DIR, "traffic.json")
 STATUS_FILE = ROOT + "/run/openvpn-server/status-server.log"
 MGMT_SOCKET = ROOT + "/run/openvpn-server/ovpnctl.sock"
 SERVICE = "openvpn-server@server.service"
