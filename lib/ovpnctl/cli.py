@@ -718,7 +718,10 @@ def render_state(cfg: dict) -> str:
     rows = clients.listing(cfg)
     total = len([c for c in rows if c["status"] != "revoked"])
     suspended = len([c for c in rows if c["status"] == "suspended"])
+    # сборка считается по коду, который запущен сейчас (lib/ рядом с пакетом)
+    build = update_mod.fingerprint(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return "\n".join([
+        line("ovpnctl version", hl("%s (build %s)" % (__version__, build))),
         line("OpenVPN state", _flag(service_active(cfgmod.SERVICE), "Running", "Not running")),
         line("Start automatically", _flag(service_enabled(cfgmod.SERVICE), "Yes", "No")),
         line("Auto-renewal", _flag(service_active(cfgmod.RENEW_TIMER), "Active", "Inactive")),

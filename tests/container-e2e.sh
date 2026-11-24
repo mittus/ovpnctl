@@ -148,6 +148,8 @@ if command -v script >/dev/null 2>&1; then
     printf '2\n0\n6\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu.log 2>&1; strip_ansi /var/log/menu.log
     chk "меню отрисовано рамкой"          "grep -q 'OpenVPN Management Script' /var/log/menu.log"
     chk "есть сводка состояния"           "grep -q 'OpenVPN state' /var/log/menu.log"
+    chk "над OpenVPN state — версия и сборка ovpnctl" \
+        "grep -B1 'OpenVPN state' /var/log/menu.log | grep -qE \"ovpnctl version: $(cat /src/VERSION) \\(build [0-9a-f]{8}\\)\""
     chk "приглашение с диапазоном 0-16"   "grep -q 'enter your selection \[0-16\]' /var/log/menu.log"
     chk "пункт 2 показал список клиентов" "grep -q 'STATUS' /var/log/menu.log"
     chk "в списке есть колонки ADDRESS, FROM, LAST CONNECTED, TRAFFIC" \
