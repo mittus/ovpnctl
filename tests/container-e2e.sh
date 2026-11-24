@@ -101,6 +101,17 @@ else
 fi
 chk "у клиента есть tun-интерфейс с адресом 10.8.0.x" "ip -4 addr | grep -q '10\.8\.0\.'"
 chk "пинг до сервера VPN 10.8.0.1" "ping -c 2 -W 3 10.8.0.1"
+echo "  --- закреплённые адреса не пересекаются с пулом ---"
+chk "обычный клиент получил первый адрес пула 10.8.0.10" "ip -4 addr | grep -q 'inet 10\\.8\\.0\\.10/'"
+chk "адрес из пула не закрепляется (client add --ip 10.8.0.50)" "! ovpnctl client add badpin --ip 10.8.0.50 >/dev/null 2>&1 && test ! -e /etc/ovpnctl/pki/issued/badpin.crt"
+ovpnctl client add pinned --ip 10.8.0.3 >/dev/null 2>&1 && ok "ovpnctl client add pinned --ip 10.8.0.3" || bad "ovpnctl client add pinned --ip 10.8.0.3"
+chk "занятый адрес не закрепляется за другим" "! ovpnctl client ip phone 10.8.0.3 >/dev/null 2>&1"
+openvpn --config /etc/ovpnctl/profiles/pinned.ovpn --dev tun7 --route-nopull --daemon \
+        --log /var/log/ovpn-pinned.log
+sleep 8
+chk "закреплённый клиент получил свой 10.8.0.3" "ip -4 addr show tun7 | grep -q 'inet 10\\.8\\.0\\.3/'"
+pkill -f ovpn-pinned.log; sleep 1
+ovpnctl client delete pinned -y >/dev/null 2>&1
 echo "  --- выгрузка профиля в личный каталог пользователя ---"
 chk "client add кладёт профиль в ~/ovpnctl" "test -s /root/ovpnctl/phone.ovpn"
 chk "содержимое совпадает с хранилищем" \
@@ -120,7 +131,7 @@ ovpnctl client delete fromsudo -y >/dev/null 2>&1
 
 chk "в списке клиентов виден адрес подключённого" \
     "ovpnctl client list | grep phone | grep -qE '10\\.8\\.0\\.[0-9]+'"
-chk "в списке клиентов колонки трафика нет" "! ovpnctl client list | grep -q 'TRAFFIC'"
+chk "в списке клиентов есть колонка трафика" "ovpnctl client list | grep -q 'TRAFFIC'"
 chk "ovpnctl traffic: у подключённого клиента трафик текущей сессии" \
     "ovpnctl traffic | grep phone | grep -qE '[0-9.]+ (KiB|MiB)'"
 chk "ovpnctl traffic phone: разбивка по периодам" \
@@ -134,29 +145,35 @@ echo "  --- ovpnctl status (фрагмент) ---"; ovpnctl status 2>&1 | head -
 
 echo; echo "=== 5б. интерактивное меню (через псевдотерминал) ==="
 if command -v script >/dev/null 2>&1; then
-    printf '2\n\n8\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu.log 2>&1; strip_ansi /var/log/menu.log
+    printf '2\n0\n6\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu.log 2>&1; strip_ansi /var/log/menu.log
     chk "меню отрисовано рамкой"          "grep -q 'OpenVPN Management Script' /var/log/menu.log"
     chk "есть сводка состояния"           "grep -q 'OpenVPN state' /var/log/menu.log"
-    chk "приглашение с диапазоном"        "grep -q 'enter your selection \[0-' /var/log/menu.log"
+    chk "приглашение с диапазоном 0-16"   "grep -q 'enter your selection \[0-16\]' /var/log/menu.log"
     chk "пункт 2 показал список клиентов" "grep -q 'STATUS' /var/log/menu.log"
-    chk "в списке есть колонка ADDRESS"   "grep -q 'ADDRESS' /var/log/menu.log"
-    chk "после списка предлагают вывести .ovpn" \
-        "grep -q 'Print a client.s .ovpn' /var/log/menu.log"
+    chk "в списке есть колонки ADDRESS, FROM, LAST CONNECTED, TRAFFIC" \
+        "grep 'ADDRESS' /var/log/menu.log | grep 'FROM' | grep 'LAST CONNECTED' | grep -q 'TRAFFIC'"
+    chk "в списке у онлайн-клиента виден трафик" \
+        "grep -E 'phone +online' /var/log/menu.log | grep -qE '[0-9.]+ (B|KiB|MiB)'"
+    chk "из списка предлагают открыть карточку клиента" \
+        "grep -q 'Client number or name for details' /var/log/menu.log"
     chk "пункт 2 называется «Client List»" "grep -qE '2\\. Client List +│' /var/log/menu.log"
-    chk "пункт 8 показал статус сервера"  "grep -q 'Endpoint:' /var/log/menu.log"
+    chk "пункт 3 называется «Client Certificates»" "grep -qE '3\\. Client Certificates +│' /var/log/menu.log"
+    chk "отдельных пунктов Online Clients и Traffic нет" \
+        "! grep -qE '[0-9]\\. (Online Clients|Traffic) ' /var/log/menu.log"
+    chk "пункт 6 показал статус сервера"  "grep -q 'Endpoint:' /var/log/menu.log"
     chk "результат ждёт Enter, а не затирается меню" \
         "grep -q 'return to the menu' /var/log/menu.log"
     chk "пункта показа .ovpn в меню больше нет" \
         "! grep -q 'Show .ovpn' /var/log/menu.log"
-    chk "пункт 'Клиенты онлайн' на третьем месте" \
-        "grep -qE '3\\. Online Clients' /var/log/menu.log"
-    chk "пункт 'Traffic' на четвёртом месте" "grep -qE '4\\. Traffic' /var/log/menu.log"
     chk "отзыва в меню нет"               "! grep -q 'Revoke Client' /var/log/menu.log"
     chk "команда revoke осталась в CLI"   "ovpnctl client revoke --help"
 
-    # выбор клиента номером прямо из списка выводит его профиль
-    printf '2\n1\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu3.log 2>&1; strip_ansi /var/log/menu3.log
-    chk "профиль выводится по номеру из списка" "grep -q 'BEGIN CERTIFICATE' /var/log/menu3.log"
+    # карточка клиента по номеру: сессия, периоды трафика, p выводит профиль
+    printf '2\n1\np\n\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu3.log 2>&1; strip_ansi /var/log/menu3.log
+    chk "карточка клиента открывается по номеру" "grep -q 'Client phone — online' /var/log/menu3.log"
+    chk "в карточке текущая сессия"       "grep -q 'This session:' /var/log/menu3.log"
+    chk "в карточке трафик по периодам"   "grep -q 'Week (7 days)' /var/log/menu3.log"
+    chk "p в карточке выводит профиль"    "grep -q 'BEGIN CERTIFICATE' /var/log/menu3.log"
 
     # создание клиента спрашивает только имя
     printf '1\nmenuclient\nn\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu5.log 2>&1; strip_ansi /var/log/menu5.log
@@ -165,32 +182,70 @@ if command -v script >/dev/null 2>&1; then
         "! grep -qE 'lifetime|Pin address' /var/log/menu5.log"
     chk "после создания предлагают вывести профиль" \
         "grep -q 'Print the profile' /var/log/menu5.log"
+
+    # Client Certificates: продление и приостановка
+    printf '3\nmenuclient\n0\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu-cert.log 2>&1; strip_ansi /var/log/menu-cert.log
+    chk "экран сертификатов: таблица со сроками" \
+        "grep -q 'Client certificates' /var/log/menu-cert.log && grep -q 'EXPIRES' /var/log/menu-cert.log"
+    chk "экран сертификатов: действия продлить и приостановить" \
+        "grep -q 'Renew certificate' /var/log/menu-cert.log && grep -q 'Suspend access' /var/log/menu-cert.log"
+    printf '3\nmenuclient\n2\ny\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu-cert2.log 2>&1; strip_ansi /var/log/menu-cert2.log
+    chk "приостановка из меню"            "ovpnctl client list | grep -qE 'menuclient +suspended'"
+    chk "в сводке под меню видно приостановленных" "grep -q 'suspended: 1' /var/log/menu-cert2.log"
+    printf '3\nmenuclient\n2\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu-cert3.log 2>&1; strip_ansi /var/log/menu-cert3.log
+    chk "для приостановленного предлагают Resume access" "grep -q 'Resume access' /var/log/menu-cert3.log"
+    chk "включение из меню"               "! ovpnctl client list | grep -qE 'menuclient +suspended'"
+    printf '3\nmenuclient\n1\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu-cert4.log 2>&1; strip_ansi /var/log/menu-cert4.log
+    chk "продление из меню"               "grep -q \"Certificate 'menuclient' renewed\" /var/log/menu-cert4.log"
     ovpnctl client delete menuclient -y >/dev/null 2>&1
 
-    printf '6\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu4.log 2>&1; strip_ansi /var/log/menu4.log
+    printf '4\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu4.log 2>&1; strip_ansi /var/log/menu4.log
     chk "Enter в запросе сразу возвращает в меню" \
         "[ \"$(grep -c 'enter your selection' /var/log/menu4.log)\" -ge 2 ]"
     chk "без лишнего «Нажмите Enter»"     "! grep -q 'Press Enter' /var/log/menu4.log"
     printf '2\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu6.log 2>&1; strip_ansi /var/log/menu6.log
     chk "0 после списка клиентов сразу возвращает в меню" \
         "[ \"$(grep -c 'enter your selection' /var/log/menu6.log)\" -ge 2 ] && ! grep -q 'Press Enter' /var/log/menu6.log"
-    printf '4\nphone\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu7.log 2>&1; strip_ansi /var/log/menu7.log
-    chk "пункт «Трафик»: общий список"     "grep -q 'Client traffic, all time' /var/log/menu7.log"
-    chk "пункт «Трафик»: периоды по клиенту" "grep -q 'Week (7 days)' /var/log/menu7.log"
-    # r обновляет оба экрана; Enter с экрана клиента — к списку, 0 из списка — в главное меню
-    printf '4\nr\nphone\nr\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu8.log 2>&1; strip_ansi /var/log/menu8.log
-    chk "трафик: r обновляет список, Enter у клиента возвращает к списку" \
-        "[ \"$(grep -c 'Client traffic, all time' /var/log/menu8.log)\" -eq 3 ]"
-    chk "трафик: r обновляет экран клиента" "[ \"$(grep -c 'Traffic of client phone' /var/log/menu8.log)\" -eq 2 ]"
-    chk "трафик: 0 из списка — сразу в главное меню" \
+    # r обновляет оба экрана; Enter с карточки — к списку, 0 из списка — в главное меню
+    printf '2\nr\nphone\nr\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu8.log 2>&1; strip_ansi /var/log/menu8.log
+    chk "список: r обновляет, Enter с карточки возвращает к списку" \
+        "[ \"$(grep -c 'online first, then by last connection' /var/log/menu8.log)\" -eq 3 ]"
+    chk "карточка: r обновляет"           "[ \"$(grep -c 'Client phone — online' /var/log/menu8.log)\" -eq 2 ]"
+    chk "список: 0 — сразу в главное меню" \
         "[ \"$(grep -c 'enter your selection' /var/log/menu8.log)\" -eq 2 ] && ! grep -q 'Press Enter' /var/log/menu8.log"
 
-    printf '6\nphone\nn\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu2.log 2>&1; strip_ansi /var/log/menu2.log
+    printf '4\nphone\nn\n\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu2.log 2>&1; strip_ansi /var/log/menu2.log
     chk "подтверждение предлагает Y/n"  "grep -q '\[Y/n\]\|\[y/N\]' /var/log/menu2.log"
     chk "ответ n отменил удаление"      "ovpnctl client list | grep -q 'phone .*offline\|phone .*online'"
 else
     skip "утилита script недоступна — меню не проверено"
 fi
+
+echo; echo "=== 5в. приостановка доступа с живым подключением ==="
+SRV_LOG_MARK=$(wc -l < /var/log/ovpn-server.log)
+ovpnctl client suspend phone > /var/log/suspend.log 2>&1 && ok "ovpnctl client suspend phone" || bad "ovpnctl client suspend phone"
+chk "активная сессия разорвана сразу" "grep -q 'session terminated' /var/log/suspend.log"
+pkill -f 'openvpn --config /etc/ovpnctl/profiles/phone.ovpn'; sleep 2
+: > /var/log/ovpn-client-susp.log
+openvpn --config /etc/ovpnctl/profiles/phone.ovpn --route-nopull --daemon --log /var/log/ovpn-client-susp.log
+sleep 12
+chk "приостановленный клиент не подключается тем же профилем" \
+    "! grep -q 'Initialization Sequence Completed' /var/log/ovpn-client-susp.log"
+chk "сервер отклонил его директивой disable" \
+    "tail -n +$SRV_LOG_MARK /var/log/ovpn-server.log | grep -q \"rejected due to 'disable' directive\""
+tail -n +$SRV_LOG_MARK /var/log/ovpn-server.log | grep -i 'disable' | tail -2 | sed 's/^/    /'
+# отклонённый висит в status-файле до delayed-exit (~5 с), файл пишется раз в 10 с
+sleep 12
+chk "приостановленный не в списке онлайн" "! ovpnctl online | grep -q phone"
+chk "статус suspended в списке клиентов" "ovpnctl client list | grep -qE 'phone +suspended'"
+pkill -f 'openvpn --config /etc/ovpnctl/profiles/phone.ovpn'; sleep 2
+ovpnctl client resume phone >/dev/null 2>&1 && ok "ovpnctl client resume phone" || bad "ovpnctl client resume phone"
+: > /var/log/ovpn-client.log
+openvpn --config /etc/ovpnctl/profiles/phone.ovpn --route-nopull --daemon --log /var/log/ovpn-client.log
+sleep 8
+chk "после resume тот же профиль снова подключается" \
+    "grep -q 'Initialization Sequence Completed' /var/log/ovpn-client.log"
+
 
 echo; echo "=== 6. отзыв доступа ==="
 ovpnctl client revoke phone -y >/dev/null 2>&1 && ok "client revoke отработал" || bad "client revoke"
@@ -267,11 +322,11 @@ pkill -f "openvpn --config /etc/ovpnctl/profiles/tester.ovpn"
 
 echo; echo "=== 8б. сброс статистики трафика ==="
 if command -v script >/dev/null 2>&1; then
-    # экран клиента: c → подтверждение y → Enter → Enter (к списку) → 0 (в главное меню)
-    printf '4\ntester\nc\ny\n\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu9.log 2>&1; strip_ansi /var/log/menu9.log
+    # карточка клиента: c → подтверждение y → Enter → Enter (к списку) → 0 (в главное меню)
+    printf '2\ntester\nc\ny\n\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu9.log 2>&1; strip_ansi /var/log/menu9.log
     chk "меню: сброс клиента с подтверждением" \
         "grep -q \"Reset traffic statistics of client 'tester'\" /var/log/menu9.log && grep -q \"statistics of client 'tester' reset\" /var/log/menu9.log"
-    printf '4\nc\nn\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu10.log 2>&1; strip_ansi /var/log/menu10.log
+    printf '2\nc\nn\n\n0\n0\n' | script -qec "ovpnctl" /dev/null > /var/log/menu10.log 2>&1; strip_ansi /var/log/menu10.log
     chk "меню: общий сброс спрашивает, ответ n ничего не сбрасывает" \
         "grep -q 'Reset traffic statistics of ALL clients' /var/log/menu10.log && grep -q 'Nothing was reset' /var/log/menu10.log"
 fi

@@ -167,6 +167,7 @@ def collect(online=None, now: float = None) -> dict:
         if len(parts) == 5 and _number(parts[3]):
             key = parts[3]
             start = _number(parts[3])
+            entry["last"] = max(entry.get("last", 0), start)
             ended = min(start + _number(parts[4]), now)
             seen = entry["live"].pop(key, None)
             if seen:
@@ -187,6 +188,7 @@ def collect(online=None, now: float = None) -> dict:
         if key in entry["closed"]:
             continue                    # status-файл ещё не обновился после отключения
         active.add((client["name"], key))
+        entry["last"] = max(entry.get("last", 0), _number(key))
         seen = entry["live"].get(key) or [0, 0, min(_number(key) or now, now)]
         rx, tx = client.get("bytes_received", 0), client.get("bytes_sent", 0)
         _add(entry, seen[2], now, max(rx - seen[0], 0), max(tx - seen[1], 0), now)
@@ -211,6 +213,25 @@ def collect(online=None, now: float = None) -> dict:
     except OSError:
         pass
     return data
+
+
+def last_connected(entry: dict):
+    """(время последнего подключения, точно ли) по записи клиента.
+
+    Поле last ведётся с 1.1.2; для статистики старых версий берём начало
+    запомненных сессий, а если их уже нет — последний день с трафиком.
+    """
+    if entry.get("last"):
+        return float(entry["last"]), True
+    starts = [_number(k) for k in list(entry.get("live", {})) + list(entry.get("closed", {}))]
+    starts = [k for k in starts if k]
+    if starts:
+        return float(max(starts)), True
+    days = sorted(entry.get("days", {}))
+    if days:
+        day = datetime.datetime.strptime(days[-1], "%Y-%m-%d")
+        return time.mktime(day.timetuple()), False
+    return None, False
 
 
 def summary(online=None, now: float = None) -> dict:

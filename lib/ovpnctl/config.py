@@ -40,6 +40,10 @@ DEFAULTS = {
     "ipv6": False,
     "subnet6": "fd42:42:42:42::/112",
     "dns": ["1.1.1.1", "1.0.0.1"],
+    # Адреса сразу после адреса сервера (при 10.8.0.0/24 — .2–.9) не входят в
+    # динамический пул: только они годятся для `client ip`. Иначе пул выдаёт
+    # закреплённый адрес другому клиенту, и трафик владельца уходит не туда.
+    "static_reserve": 8,
     "redirect_gateway": True,
     "key_type": "ec",            # ec | rsa
     "ec_curve": "prime256v1",
@@ -106,3 +110,23 @@ def network_cidr(cfg: dict) -> str:
 
     net = ipaddress.IPv4Network("%s/%s" % (cfg["subnet"], cfg["netmask"]), strict=False)
     return str(net)
+
+
+def address_plan(cfg: dict) -> dict:
+    """Раскладка адресов VPN-подсети: сервер, резерв под client ip, динамический пул."""
+    import ipaddress
+
+    net = ipaddress.IPv4Network(network_cidr(cfg))
+    server = net.network_address + 1
+    last = net.broadcast_address - 1
+    free = int(last) - int(server)          # адресов для клиентов
+    if free < 1:
+        raise OvpnError("VPN subnet %s is too small." % net)
+    reserve = max(0, min(int(cfg.get("static_reserve", DEFAULTS["static_reserve"])), free // 2))
+    static = (server + 1, server + reserve) if reserve else None
+    return {
+        "network": net,
+        "server": server,
+        "static": static,
+        "dynamic": (server + 1 + reserve, last),
+    }

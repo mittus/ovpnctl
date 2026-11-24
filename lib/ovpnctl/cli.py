@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -55,7 +56,7 @@ from .util import (
 def _status(value: str) -> str:
     if value == "online":
         return hl(value)
-    if value in ("revoked", "expired"):
+    if value in ("revoked", "expired", "suspended"):
         return red(value)
     return value
 
@@ -111,19 +112,29 @@ def export_profile(name: str, cfg: dict, output: str = None) -> str:
     return target
 
 
+def _when(stamp, exact: bool = True) -> str:
+    if not stamp:
+        return "—"
+    return datetime.datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M" if exact else "%Y-%m-%d")
+
+
 def _client_rows(rows, numbered: bool = False) -> str:
+    """Таблица Client List: онлайн сверху, трафик за всё время, если он был."""
     printable = []
     for index, r in enumerate(rows, 1):
-        row = [hl(r["name"]), _status(r["status"]), r["expires"], _days(r["days_left"]),
-               _or_dash(r["address"]), r["created"]]
+        last = _when(r.get("last_connected"), r.get("last_connected_exact", True))
+        row = [hl(r["name"]), _status(r["status"]), _or_dash(r["address"]),
+               r.get("real_address") or "—",
+               hl(last) if r["status"] == "online" else last,
+               _bytes(r["total"]) if r.get("total") else "—"]
         printable.append((["%d." % index] if numbered else []) + row)
-    headers = ["NAME", "STATUS", "EXPIRES", "DAYS", "ADDRESS", "CREATED"]
+    headers = ["NAME", "STATUS", "ADDRESS", "FROM", "LAST CONNECTED", "TRAFFIC"]
     return table(printable, (["#"] if numbered else []) + headers)
 
 
 def cmd_client_list(args) -> int:
     cfg = cfgmod.load()
-    rows = clients.listing(cfg)
+    rows = clients.overview(cfg)
     if args.json:
         print(json.dumps(rows, indent=2, ensure_ascii=False))
         return 0
@@ -172,6 +183,28 @@ def cmd_client_renew(args) -> int:
        % (args.name, result["expires"][:10], result["profile"]))
     warn("The client must re-import the .ovpn (the old one works until the previous expiry date).")
     return 0
+
+
+def cmd_client_suspend(args) -> int:
+    cfg = cfgmod.load()
+    killed = clients.suspend(args.name, cfg)
+    ok("Client '%s' suspended%s. Resume: ovpnctl client resume %s"
+       % (args.name, ", active session terminated" if killed else "", args.name))
+    return 0
+
+
+def cmd_client_resume(args) -> int:
+    cfg = cfgmod.load()
+    clients.resume(args.name, cfg)
+    ok("Client '%s' resumed — the same .ovpn profile works again." % args.name)
+    return 0
+
+
+def _warn_static_conflicts(cfg: dict) -> None:
+    for name, ip in clients.static_conflicts(cfg):
+        warn("Client '%s' is pinned to %s, which is inside the dynamic pool — another client "
+             "may get the same address. Re-pin it: ovpnctl client ip %s <address in %s>"
+             % (name, ip, name, clients.static_range(cfg)))
 
 
 def cmd_client_ip(args) -> int:
@@ -360,6 +393,7 @@ def cmd_server(args) -> int:
         systemctl("restart", cfgmod.FIREWALL_UNIT, check=False)
         srv.restart()
         ok("Configuration rebuilt and applied.")
+        _warn_static_conflicts(cfg)
     elif action == "config":
         sys.stdout.write(open(cfgmod.server_conf_path()).read())
     elif action == "logs":
@@ -518,6 +552,7 @@ def cmd_update(args) -> int:
         # сюда приходит уже новый код — перегенерировать конфиги по своим шаблонам
         for item in update_mod.finish():
             print("* %s" % item)
+        _warn_static_conflicts(cfgmod.load())
         return 0
 
     result = update_mod.run(repo=args.repo, branch=args.branch, local=args.source,
@@ -624,28 +659,26 @@ MENU_SECTIONS = [
     [
         (1, "Add Client"),
         (2, "Client List"),
-        (3, "Online Clients"),
-        (4, "Traffic"),
-        (5, "Renew Client Certificate"),
-        (6, "Delete Client"),
-        (7, "Assign Static IP"),
+        (3, "Client Certificates"),
+        (4, "Delete Client"),
+        (5, "Assign Static IP"),
     ],
     [
-        (8, "Server Status"),
-        (9, "Restart OpenVPN"),
-        (10, "Server Logs"),
-        (11, "Rebuild Configuration"),
-        (12, "Change Endpoint, Port or DNS"),
+        (6, "Server Status"),
+        (7, "Restart OpenVPN"),
+        (8, "Server Logs"),
+        (9, "Rebuild Configuration"),
+        (10, "Change Endpoint, Port or DNS"),
     ],
     [
-        (13, "Check Certificate Expiry"),
-        (14, "Renew Due Certificates"),
+        (11, "Check Certificate Expiry"),
+        (12, "Renew Due Certificates"),
     ],
     [
-        (15, "Diagnostics (doctor)"),
-        (16, "Backup"),
-        (17, "Open VPN Port in ufw"),
-        (18, "Update ovpnctl"),
+        (13, "Diagnostics (doctor)"),
+        (14, "Backup"),
+        (15, "Open VPN Port in ufw"),
+        (16, "Update ovpnctl"),
     ],
 ]
 
@@ -682,13 +715,16 @@ def render_state(cfg: dict) -> str:
         return "%s%s:%s %s" % (C_WHITE, label, C_RESET, value)
 
     online = len(srv.online_clients())
-    total = len([c for c in clients.listing(cfg) if c["status"] != "revoked"])
+    rows = clients.listing(cfg)
+    total = len([c for c in rows if c["status"] != "revoked"])
+    suspended = len([c for c in rows if c["status"] == "suspended"])
     return "\n".join([
         line("OpenVPN state", _flag(service_active(cfgmod.SERVICE), "Running", "Not running")),
         line("Start automatically", _flag(service_enabled(cfgmod.SERVICE), "Yes", "No")),
         line("Auto-renewal", _flag(service_active(cfgmod.RENEW_TIMER), "Active", "Inactive")),
         line("Endpoint", hl("%s:%d/%s" % (cfg["endpoint"], cfg["port"], cfg["proto"]))),
-        line("Clients", "%s, online: %s" % (hl(total), hl(online))),
+        line("Clients", "%s, online: %s%s" % (hl(total), hl(online),
+                                              ", suspended: %s" % red(suspended) if suspended else "")),
     ])
 
 
@@ -797,22 +833,9 @@ def _menu_client_add(cfg: dict) -> None:
         cmd_client_show(_Args(name=name, path=False))
 
 
-def _menu_client_list(cfg: dict) -> None:
-    """Список клиентов, а следом — возможность вывести чей-нибудь .ovpn."""
-    cmd_client_list(_Args(json=False, numbered=True))
-    if not clients.listing(cfg):
-        return
-    print()
-    name = _pick_client(cfg, prompt="Print a client's .ovpn — number or name", show_list=False,
-                        include_revoked=True)
-    if name is None:
-        return
-    print()
-    cmd_client_show(_Args(name=name, path=False))
-
-
 REFRESH_WORDS = ("r", "к")                 # «к» — та же клавиша в русской раскладке
 RESET_WORDS = ("c", "с")                   # кириллическая «с» — та же клавиша
+PRINT_WORDS = ("p", "з")                   # «з» — та же клавиша в русской раскладке
 
 
 def _nav_input(prompt: str) -> str:
@@ -823,24 +846,30 @@ def _nav_input(prompt: str) -> str:
         return "0"
 
 
-def _menu_traffic(cfg: dict) -> None:
-    """Общий трафик всех клиентов → по периодам для выбранного.
+def _choose(raw: str, rows: list):
+    """Номер из списка или имя → имя клиента (None, если такого нет)."""
+    names = [r["name"] for r in rows]
+    if raw.isdigit() and 1 <= int(raw) <= len(names):
+        return names[int(raw) - 1]
+    return raw if raw in names else None
 
-    На обоих экранах r обновляет данные; Enter/0 на экране клиента возвращает
-    к общему списку, а из списка — в главное меню.
+
+def _menu_client_list(cfg: dict) -> None:
+    """Client List: онлайн сверху, трафик за всё время → карточка клиента.
+
+    r обновляет экран, c сбрасывает трафик всех; Enter/0 — в главное меню.
     """
     while True:
-        rows = _traffic_rows(cfg)
+        rows = clients.overview(cfg)
         if not rows:
             info("No clients yet. Create the first one with option 1.")
             return
         clear_screen()
-        print(bold("Client traffic, all time"))
-        print(_traffic_table(rows, numbered=True))
-        print(dim("  Received/sent — from the server's side."))
+        print(bold("Clients") + dim("  (online first, then by last connection; traffic — all time)"))
+        print(_client_rows(rows, numbered=True))
         print()
-        raw = _nav_input("Client number or name for traffic by period "
-                         "(r — refresh, c — reset all, Enter or 0 — main menu)")
+        raw = _nav_input("Client number or name for details "
+                         "(r — refresh, c — reset all traffic, Enter or 0 — main menu)")
         if raw.lower() in REFRESH_WORDS:
             continue
         if raw.lower() in RESET_WORDS:
@@ -849,27 +878,112 @@ def _menu_traffic(cfg: dict) -> None:
             continue
         if raw.lower() in CANCEL_WORDS:
             raise BackToMenu()
-        names = [r["name"] for r in rows]
-        if raw.isdigit() and 1 <= int(raw) <= len(names):
-            raw = names[int(raw) - 1]
-        if raw not in names:
+        name = _choose(raw, rows)
+        if name is None:
             warn("Client '%s' not found." % raw)
             pause("Press Enter to return to the client list")
             continue
-        _menu_traffic_client(raw)
+        _menu_client_card(cfg, name)
 
 
-def _menu_traffic_client(name: str) -> None:
+def _client_card(cfg: dict, name: str) -> None:
+    row = next((r for r in clients.overview(cfg) if r["name"] == name), None)
+    if row is None:
+        raise OvpnError("client '%s' not found." % name)
+    session = next((c for c in srv.online_clients() if c["name"] == name), None)
+    print(bold("Client ") + hl(name) + " — " + _status(row["status"]))
+    kind = "pinned" if row.get("static_ip") else "from the pool"
+    print("  VPN address:    %s" % ("%s (%s)" % (hl(row["address"]), kind) if row["address"] else "—"))
+    if session:
+        print("  Connected:      %s from %s" % (hl(session["connected_since"]), session["real_address"]))
+        print("  This session:   received %s, sent %s"
+              % (_bytes(session["bytes_received"]), _bytes(session["bytes_sent"])))
+    else:
+        print("  Last connected: %s" % _when(row.get("last_connected"), row.get("last_connected_exact", True)))
+    if row["status"] != "revoked":
+        print("  Certificate:    until %s (%s days)" % (row["expires"], _days(row["days_left"])))
+    print()
+    print(table([[r["title"], _bytes(r["rx"]), _bytes(r["tx"]), _bytes(r["total"])]
+                 for r in traffic.periods(name)], ["PERIOD", "RECEIVED", "SENT", "TOTAL"]))
+    print(dim("  Received/sent — from the server's side."))
+
+
+def _menu_client_card(cfg: dict, name: str) -> None:
     while True:
         clear_screen()
-        cmd_traffic(_Args(name=name, json=False, collect=False, reset=False, yes=False))
+        _client_card(cfg, name)
         print()
-        raw = _nav_input("r — refresh, c — reset this client, Enter or 0 — back to the client list")
-        if raw.lower() in RESET_WORDS:
+        raw = _nav_input("p — print .ovpn, c — reset traffic, r — refresh, "
+                         "Enter or 0 — back to the client list")
+        if raw.lower() in PRINT_WORDS:
+            print()
+            cmd_client_show(_Args(name=name, path=False))
+            pause("Press Enter to continue")
+        elif raw.lower() in RESET_WORDS:
             _traffic_reset(name, False)
             pause("Press Enter to continue")
         elif raw.lower() not in REFRESH_WORDS:
             return
+
+
+def _cert_rows(cfg: dict) -> list:
+    return [r for r in clients.listing(cfg) if r["status"] != "revoked"]
+
+
+def _cert_table(rows) -> str:
+    printable = [["%d." % i, hl(r["name"]), _status(r["status"]), r["expires"],
+                  _days(r["days_left"]), r["created"]]
+                 for i, r in enumerate(rows, 1)]
+    return table(printable, ["#", "NAME", "STATUS", "EXPIRES", "DAYS", "CREATED"])
+
+
+def _menu_certificates(cfg: dict) -> None:
+    """Client Certificates: продление и приостановка доступа клиента."""
+    while True:
+        rows = _cert_rows(cfg)
+        if not rows:
+            info("No clients yet. Create the first one with option 1.")
+            return
+        clear_screen()
+        print(bold("Client certificates"))
+        print(_cert_table(rows))
+        print()
+        raw = _nav_input("Client number or name (Enter or 0 — main menu)")
+        if raw.lower() in REFRESH_WORDS:
+            continue
+        if raw.lower() in CANCEL_WORDS:
+            raise BackToMenu()
+        name = _choose(raw, rows)
+        if name is None:
+            warn("Client '%s' not found." % raw)
+        else:
+            _menu_certificate_actions(cfg, name)
+        pause("Press Enter to return to the certificate list")
+
+
+def _menu_certificate_actions(cfg: dict, name: str) -> None:
+    row = next(r for r in _cert_rows(cfg) if r["name"] == name)
+    suspended = row["status"] == "suspended"
+    print()
+    print("%s %s: certificate until %s (%s days), access: %s"
+          % (bold("Client"), hl(name), row["expires"], _days(row["days_left"]),
+             red("suspended") if suspended else hl("active")))
+    print("  %s Renew certificate" % hl(" 1."))
+    print("  %s %s" % (hl(" 2."), "Resume access" if suspended else "Suspend access"))
+    print()
+    raw = _nav_input("Action (Enter or 0 — back)")
+    if raw == "1":
+        cmd_client_renew(_Args(name=name, days=None, new_key=False))
+    elif raw == "2" and suspended:
+        cmd_client_resume(_Args(name=name))
+    elif raw == "2":
+        if ask_yes_no("Suspend client '%s'? Its session is terminated; the same profile "
+                      "works again after resume." % name, False):
+            cmd_client_suspend(_Args(name=name))
+        else:
+            info("Nothing changed.")
+    elif raw.lower() not in CANCEL_WORDS:
+        warn("No such action: %s" % raw)
 
 
 def _menu_client_action(cfg: dict, action) -> None:
@@ -930,24 +1044,21 @@ def _menu_update(cfg: dict) -> None:
 MENU_ACTIONS = {
     "1": _menu_client_add,
     "2": _menu_client_list,
-    "3": lambda cfg: cmd_online(_Args(json=False)),
-    "4": _menu_traffic,
-    "5": lambda cfg: _menu_client_action(
-        cfg, lambda name: cmd_client_renew(_Args(name=name, days=None, new_key=False))),
-    "6": lambda cfg: _menu_client_action(
+    "3": _menu_certificates,
+    "4": lambda cfg: _menu_client_action(
         cfg, lambda name: cmd_client_delete(_Args(name=name, yes=False))),
-    "7": _menu_client_ip,
-    "8": lambda cfg: cmd_status(_Args(json=False)),
-    "9": lambda cfg: cmd_server(_Args(action="restart", lines=50)),
-    "10": lambda cfg: cmd_server(_Args(action="logs", lines=50)),
-    "11": lambda cfg: cmd_server(_Args(action="rebuild", lines=50)),
-    "12": _menu_change_settings,
-    "13": lambda cfg: cmd_pki_check(_Args(json=False)),
-    "14": lambda cfg: cmd_pki_renew(_Args(force=False, quiet=False)),
-    "15": lambda cfg: cmd_doctor(_Args()),
-    "16": lambda cfg: cmd_backup(_Args(output=None)),
-    "17": _menu_ufw,
-    "18": _menu_update,
+    "5": _menu_client_ip,
+    "6": lambda cfg: cmd_status(_Args(json=False)),
+    "7": lambda cfg: cmd_server(_Args(action="restart", lines=50)),
+    "8": lambda cfg: cmd_server(_Args(action="logs", lines=50)),
+    "9": lambda cfg: cmd_server(_Args(action="rebuild", lines=50)),
+    "10": _menu_change_settings,
+    "11": lambda cfg: cmd_pki_check(_Args(json=False)),
+    "12": lambda cfg: cmd_pki_renew(_Args(force=False, quiet=False)),
+    "13": lambda cfg: cmd_doctor(_Args()),
+    "14": lambda cfg: cmd_backup(_Args(output=None)),
+    "15": _menu_ufw,
+    "16": _menu_update,
 }
 
 
@@ -976,7 +1087,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser = client_sub.add_parser("add", help="create a client and its .ovpn profile")
     add_parser.add_argument("name", metavar="certname", help="client name: Latin letters, digits, . _ -")
     add_parser.add_argument("--days", type=int, help="certificate lifetime in days")
-    add_parser.add_argument("--ip", help="pin a static address in the VPN subnet")
+    add_parser.add_argument("--ip", help="pin a static address (static range, 10.8.0.2–10.8.0.9 by default)")
     add_parser.add_argument("--print", dest="print_profile", action="store_true", help="print the .ovpn right away")
     add_parser.set_defaults(func=cmd_client_add)
 
@@ -1005,7 +1116,17 @@ def build_parser() -> argparse.ArgumentParser:
     renew_parser.add_argument("--new-key", action="store_true", help="generate a new key")
     renew_parser.set_defaults(func=cmd_client_renew)
 
-    ip_parser = client_sub.add_parser("ip", help="pin a static address to a client")
+    suspend_parser = client_sub.add_parser(
+        "suspend", help="suspend access (session cut off, profile kept for resume)")
+    suspend_parser.add_argument("name", metavar="certname")
+    suspend_parser.set_defaults(func=cmd_client_suspend)
+
+    resume_parser = client_sub.add_parser("resume", help="resume a suspended client")
+    resume_parser.add_argument("name", metavar="certname")
+    resume_parser.set_defaults(func=cmd_client_resume)
+
+    ip_parser = client_sub.add_parser(
+        "ip", help="pin a static address to a client (static range, 10.8.0.2–10.8.0.9 by default)")
     ip_parser.add_argument("name", metavar="certname")
     ip_parser.add_argument("address", metavar="address")
     ip_parser.set_defaults(func=cmd_client_ip)

@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from ovpnctl import clients, pki, renew as renew_mod, server as srv  # noqa: E402
 from ovpnctl import traffic, update as update_mod  # noqa: E402
 from ovpnctl import config as cfgmod  # noqa: E402
-from ovpnctl.util import run  # noqa: E402
+from ovpnctl.util import OvpnError, run  # noqa: E402
 
 PASSED = []
 FAILED = []
@@ -89,7 +89,8 @@ def main():
     srv.deploy_pki_to_server(cfg)
     conf = open(srv.write_server_conf(cfg)).read()
     for directive in ("tls-crypt", "crl-verify", "dh none", "topology subnet",
-                      "server 10.8.0.0 255.255.255.0", "data-ciphers"):
+                      "server 10.8.0.0 255.255.255.0 nopool",
+                      "ifconfig-pool 10.8.0.10 10.8.0.254 255.255.255.0", "data-ciphers"):
         check("server.conf содержит '%s'" % directive, directive in conf)
     check("server.conf вызывает скрипт учёта трафика",
           "client-disconnect %s" % srv.TRAFFIC_SCRIPT in conf and "script-security 2" in conf)
@@ -99,14 +100,54 @@ def main():
 
     print("\n== Клиенты ==")
     clients.add("alice", cfg)
-    clients.add("bob", cfg, days=365, static_ip="10.8.0.50")
+    clients.add("bob", cfg, days=365, static_ip="10.8.0.5")
     profile = open(clients.profile_path("alice")).read()
     for tag in ("<ca>", "<cert>", "<key>", "<tls-crypt>", "remote vpn.example.com 1194"):
         check("в профиле есть %s" % tag, tag in profile)
     check("права профиля 0600", oct(os.stat(clients.profile_path("alice")).st_mode & 0o777) == "0o600")
     check("статический IP записан в ccd",
-          "10.8.0.50" in open(os.path.join(srv.CCD_DIR, "bob")).read())
+          "10.8.0.5" in open(os.path.join(srv.CCD_DIR, "bob")).read())
     check("клиент виден в списке", any(r["name"] == "alice" for r in clients.listing(cfg)))
+
+    print("\n== Закреплённые адреса и динамический пул ==")
+    plan = cfgmod.address_plan(cfg)
+    check("резерв под client ip — 10.8.0.2–10.8.0.9",
+          [str(a) for a in plan["static"]] == ["10.8.0.2", "10.8.0.9"], str(plan["static"]))
+    check("пул начинается после резерва",
+          [str(a) for a in plan["dynamic"]] == ["10.8.0.10", "10.8.0.254"], str(plan["dynamic"]))
+
+    def refused(func, *args):
+        try:
+            func(*args)
+        except OvpnError:
+            return True
+        return False
+
+    check("адрес из динамического пула не закрепляется",
+          refused(clients.set_static_ip, "alice", "10.8.0.50", cfg))
+    check("адрес сервера не закрепляется", refused(clients.set_static_ip, "alice", "10.8.0.1", cfg))
+    check("занятый адрес не закрепляется за другим",
+          refused(clients.set_static_ip, "alice", "10.8.0.5", cfg))
+    check("повторное закрепление того же адреса за владельцем проходит",
+          not refused(clients.set_static_ip, "bob", "10.8.0.5", cfg))
+    issued = pki.exists("eve")
+    check("client add с адресом из пула отказывает до выпуска сертификата",
+          refused(clients.add, "eve", cfg, None, "10.8.0.60") and not pki.exists("eve") and not issued)
+    with open(os.path.join(srv.CCD_DIR, "legacy"), "w") as fh:
+        fh.write("# вручную\nifconfig-push 10.8.0.3 255.255.255.0\n")
+    check("ручной ccd тоже считается занятым",
+          refused(clients.set_static_ip, "alice", "10.8.0.3", cfg))
+    with open(os.path.join(srv.CCD_DIR, "legacy"), "w") as fh:
+        fh.write("ifconfig-push 10.8.0.40 255.255.255.0\n")
+    check("закрепление внутри пула (от старой версии) находится",
+          clients.static_conflicts(cfg) == [("legacy", "10.8.0.40")], str(clients.static_conflicts(cfg)))
+    os.unlink(os.path.join(srv.CCD_DIR, "legacy"))
+    small = dict(cfg, netmask="255.255.255.248")
+    check("в маленькой подсети резерв не съедает пул",
+          [str(a) for a in cfgmod.address_plan(small)["dynamic"]] == ["10.8.0.4", "10.8.0.6"],
+          str(cfgmod.address_plan(small)))
+    check("static_reserve 0 — только динамический пул",
+          cfgmod.address_plan(dict(cfg, static_reserve=0))["static"] is None)
 
     print("\n== Отзыв ==")
     bob_serial = pki.serial_of(pki.cert_path("bob"))
@@ -192,7 +233,7 @@ def main():
                  "HEADER,CLIENT_LIST,Common Name,Real Address,Virtual Address,"
                  "Virtual IPv6 Address,Bytes Received,Bytes Sent,Connected Since,"
                  "Connected Since (time_t),Username,Client ID,Peer ID,Data Channel Cipher\n"
-                 "CLIENT_LIST,alice,203.0.113.5:51820,10.8.0.2,,12345,6789,"
+                 "CLIENT_LIST,alice,203.0.113.5:51820,10.8.0.12,,12345,6789,"
                  "Mon Sep  1 10:00:00 2026,1756713600,UNDEF,0,0,AES-256-GCM\n")
     online = srv.online_clients()
     check("клиент распознан в status-файле",
@@ -293,9 +334,9 @@ def main():
         fh.write("HEADER,CLIENT_LIST,Common Name,Real Address,Virtual Address,"
                  "Virtual IPv6 Address,Bytes Received,Bytes Sent,Connected Since,"
                  "Connected Since (time_t),Username,Client ID,Peer ID\n"
-                 "CLIENT_LIST,UNDEF,188.170.79.142:32818,10.8.0.9,,800,400,"
+                 "CLIENT_LIST,UNDEF,188.170.79.142:32818,10.8.0.19,,800,400,"
                  "Thu Sep 24 23:52:11 2026,%d,UNDEF,5,0\n"
-                 "CLIENT_LIST,UNDEF,198.51.100.7:1000,10.8.0.77,,10,10,"
+                 "CLIENT_LIST,UNDEF,198.51.100.7:1000,10.8.0.7,,10,10,"
                  "Thu Sep 24 23:52:11 2026,1234,UNDEF,6,1\n" % connected)
     store = traffic._load()
     store["UNDEF"] = {"rx": 1, "tx": 1, "days": {}, "slots": {}, "live": {}, "closed": {}}
@@ -310,12 +351,68 @@ def main():
     check("трафик сессии с потерянным именем идёт настоящему клиенту",
           store["dave"]["rx"] == 800 - 700 and store["dave"]["tx"] == 400 - 350,
           "%s/%s" % (store["dave"]["rx"], store["dave"]["tx"]))
-    clients.add("pinned", cfg, static_ip="10.8.0.77")
+    clients.add("pinned", cfg, static_ip="10.8.0.7")
     check("UNDEF опознан по закреплённому адресу", srv.online_clients()[1]["name"] == "pinned")
     check("сервер не начинает смену ключей сам (нет гонки с клиентом)",
           "reneg-sec 0" in srv.build_server_conf(cfg))
     check("смену ключей раз в час начинает клиент",
           "reneg-sec 3600" in clients.profile_text("pinned", cfg))
+
+    print("\n== Приостановка доступа ==")
+    clients.add("sleepy", cfg, static_ip="10.8.0.8")
+    sleepy_ccd = os.path.join(srv.CCD_DIR, "sleepy")
+    clients.suspend("sleepy", cfg)
+    body = open(sleepy_ccd).read()
+    check("suspend пишет disable и сохраняет адрес",
+          "disable" in body.split() and "ifconfig-push 10.8.0.8" in body, body)
+    check("в списке — suspended",
+          [r["status"] for r in clients.listing(cfg) if r["name"] == "sleepy"] == ["suspended"])
+    check("профиль приостановленного не удалён", os.path.exists(clients.profile_path("sleepy")))
+    clients.set_static_ip("sleepy", "10.8.0.6", cfg)
+    body = open(sleepy_ccd).read()
+    check("смена адреса не снимает приостановку",
+          "disable" in body.split() and "10.8.0.6" in body and "10.8.0.8" not in body, body)
+    clients.renew("sleepy", cfg)
+    check("продление не снимает приостановку", clients.is_suspended("sleepy"))
+    clients.resume("sleepy", cfg)
+    check("resume убирает только disable",
+          open(sleepy_ccd).read() == "ifconfig-push 10.8.0.6 255.255.255.0\n", open(sleepy_ccd).read())
+    check("после resume статус не suspended",
+          [r["status"] for r in clients.listing(cfg) if r["name"] == "sleepy"] != ["suspended"])
+    clients.add("napper", cfg)
+    clients.suspend("napper", cfg)
+    clients.resume("napper", cfg)
+    check("ccd без директив после resume удаляется", not os.path.exists(os.path.join(srv.CCD_DIR, "napper")))
+    clients.revoke("napper", cfg)
+    check("отозванного не приостановить", refused(clients.suspend, "napper", cfg))
+
+    print("\n== Client List: онлайн сверху, по последнему подключению ==")
+    for name in ("early", "late", "gone", "never"):
+        clients.add(name, cfg)
+    with open(srv.TRAFFIC_LOG, "a") as fh:
+        fh.write("gone,100,200,%d,60\n" % (reset_now - 50))
+    with open(cfgmod.STATUS_FILE, "w") as fh:
+        fh.write("HEADER,CLIENT_LIST,Common Name,Real Address,Virtual Address,"
+                 "Virtual IPv6 Address,Bytes Received,Bytes Sent,Connected Since,"
+                 "Connected Since (time_t),Username,Client ID,Peer ID\n"
+                 "CLIENT_LIST,early,198.51.100.1:1000,10.8.0.20,,10,10,"
+                 "Thu Sep 24 20:00:00 2026,%d,early,1,0\n"
+                 "CLIENT_LIST,late,198.51.100.2:1000,10.8.0.21,,10,10,"
+                 "Thu Sep 24 21:00:00 2026,%d,late,2,1\n" % (reset_now - 7200, reset_now - 3600))
+    rows = clients.overview(cfg)
+    order = [r["name"] for r in rows]
+    check("онлайн сверху, свежее подключение первым", order[:2] == ["late", "early"], str(order))
+    check("у онлайн-клиента видно, откуда подключён", rows[0]["real_address"] == "198.51.100.2:1000")
+    check("среди остальных недавний выше ни разу не подключавшегося",
+          order.index("gone") < order.index("never"), str(order))
+    check("отозванные в самом конце",
+          all(r["status"] == "revoked" for r in rows[order.index("napper"):]), str(order))
+    check("последнее подключение запомнено после отключения",
+          traffic.last_connected(traffic._load()["gone"]) == (float(reset_now - 50), True))
+    check("трафик клиента в списке", [r["total"] for r in rows if r["name"] == "gone"] == [300])
+    check("у старой статистики без поля last дата берётся из сессий или дней",
+          traffic.last_connected({"days": {"2026-11-20": [1, 1]}})[1] is False)
+    os.unlink(cfgmod.STATUS_FILE)
 
     print("\n== Обновление ovpnctl ==")
     repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
